@@ -591,7 +591,7 @@ async function resolveVortexMovie(tmdbId) {
     timed(resolveVidzee("movie", tmdbId), 7e3, []),
     timed(resolveVidlink("movie", tmdbId), 7e3, [])
   ]);
-  let streams = uniqueStreams([...vidzeeStreams, ...linkStreams]);
+  let streams = uniqueStreams([...linkStreams, ...vidzeeStreams]);
   streams = await withVertexFallback(streams, () => resolveMovie(tmdbId));
   if (streams.length === 0) throw new Error("Vortex could not resolve a stream for this movie");
   return {

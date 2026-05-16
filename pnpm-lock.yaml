@@ -11,6 +11,12 @@ importers:
       '@cloudflare/workers-types':
         specifier: ^4.20260421.1
         version: 4.20260516.1
+      '@types/node':
+        specifier: ^22.16.5
+        version: 22.19.19
+      esbuild:
+        specifier: ^0.27.1
+        version: 0.27.3
       typescript:
         specifier: ^5.8.3
         version: 5.9.3
@@ -392,6 +398,9 @@ packages:
   '@speed-highlight/core@1.2.15':
     resolution: {integrity: sha512-BMq1K3DsElxDWawkX6eLg9+CKJrTVGCBAWVuHXVUV2u0s2711qiChLSId6ikYPfxhdYocLNt3wWwSvDiTvFabw==}
 
+  '@types/node@22.19.19':
+    resolution: {integrity: sha512-dyh/xO2Fh5bYrfWaaqGrRQQGkNdmYw6AmaAUvYeUMNTWQtvb796ikLdmTchRmOlOiIJ1TDXfWgVx1QkUlQ6Hew==}
+
   blake3-wasm@2.1.5:
     resolution: {integrity: sha512-F1+K8EbfOZE49dtoPtmxUQrpXaBIl3ICvasLh+nJta0xkz+9kF/7uet9fLnwKqhDrmj6g+6K3Tw9yQPUg2ka5g==}
 
@@ -451,6 +460,9 @@ packages:
     resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
     engines: {node: '>=14.17'}
     hasBin: true
+
+  undici-types@6.21.0:
+    resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
 
   undici@7.24.8:
     resolution: {integrity: sha512-6KQ/+QxK49Z/p3HO6E5ZCZWNnCasyZLa5ExaVYyvPxUwKtbCPMKELJOqh7EqOle0t9cH/7d2TaaTRRa6Nhs4YQ==}
@@ -727,6 +739,10 @@ snapshots:
 
   '@speed-highlight/core@1.2.15': {}
 
+  '@types/node@22.19.19':
+    dependencies:
+      undici-types: 6.21.0
+
   blake3-wasm@2.1.5: {}
 
   cookie@1.1.1: {}
@@ -824,6 +840,8 @@ snapshots:
     optional: true
 
   typescript@5.9.3: {}
+
+  undici-types@6.21.0: {}
 
   undici@7.24.8: {}
 

@@ -5,12 +5,17 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "dev:node": "pnpm run build && node dist/server.js",
+    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/server.js",
     "deploy": "wrangler deploy",
     "dry-run": "wrangler deploy --dry-run --outdir dist-worker",
+    "start": "node dist/server.js",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260421.1",
+    "@types/node": "^22.16.5",
+    "esbuild": "^0.27.1",
     "typescript": "^5.8.3",
     "wrangler": "^4.84.1"
   }

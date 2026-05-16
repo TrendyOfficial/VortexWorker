@@ -17,6 +17,12 @@ docker build -t vortex-api .
 docker run -p 8787:8787 -e PORT=8787 vortex-api
 ```
 
+## Docker Compose
+
+```bash
+docker compose up -d --build
+```
+
 ## Nixpacks
 
 Nixpacks can deploy this folder directly. It runs:

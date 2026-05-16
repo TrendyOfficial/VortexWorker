@@ -1,0 +1,13 @@
+services:
+  vortex-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vortex-api:latest
+    container_name: vortex-api
+    restart: unless-stopped
+    environment:
+      PORT: "8787"
+      NODE_ENV: production
+    ports:
+      - "8787:8787"

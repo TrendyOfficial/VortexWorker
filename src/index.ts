@@ -1,7 +1,9 @@
 import { withCache } from "./lib/cache";
 import {
   resolveVortexAnime,
+  resolveVortexMovieBySource,
   resolveVortexMovie,
+  resolveVortexTvBySource,
   resolveVortexTv,
   type VortexResult,
 } from "./lib/scrapers/vortex";
@@ -31,7 +33,9 @@ export default {
         note: "API-only Worker. Prefer direct upstream stream URLs; /api/stream is a fallback.",
         routes: [
           "/api/vortex/movie/{tmdbId}",
+          "/api/vortex/movie/{tmdbId}?source={vortex|vidfast|vidking|vidapi|vidsrc-cc|2embed|prime}",
           "/api/vortex/tv/{tmdbId}/{season}/{episode}",
+          "/api/vortex/tv/{tmdbId}/{season}/{episode}?source={vortex|vidfast|vidking|vidapi|vidsrc-cc|2embed|prime}",
           "/api/vortex/anime/{id}/{episode}/{sub|dub}",
           "/api/movie/{tmdbId}",
           "/api/tv/{tmdbId}/{season}/{episode}",
@@ -69,21 +73,24 @@ function rewriteAlias(url: URL, from: string, to: string): URL {
 async function handleVortex(url: URL): Promise<Response> {
   const segs = url.pathname.replace(/^\/api\/vortex\/?/, "").split("/").filter(Boolean);
   const ttl = Math.min(Math.max(Number(url.searchParams.get("ttl")) || 600, 30), 3600);
+  const source = sanitizeSource(url.searchParams.get("source"));
 
   try {
     const { data, cached } = await withCache<VortexResult>(
       "vortex-stream",
-      segs.join("/"),
+      `${source}:${segs.join("/")}`,
       ttl,
       async () => {
         if (segs[0] === "movie") {
           if (!segs[1]) throw new Error("Missing tmdbId");
-          return resolveVortexMovie(segs[1]);
+          return source === "vortex" ? resolveVortexMovie(segs[1]) : resolveVortexMovieBySource(segs[1], source);
         }
 
         if (segs[0] === "tv") {
           if (!segs[1] || !segs[2] || !segs[3]) throw new Error("Missing tmdbId/season/episode");
-          return resolveVortexTv(segs[1], segs[2], segs[3]);
+          return source === "vortex"
+            ? resolveVortexTv(segs[1], segs[2], segs[3])
+            : resolveVortexTvBySource(segs[1], segs[2], segs[3], source);
         }
 
         if (segs[0] === "anime") {
@@ -101,8 +108,14 @@ async function handleVortex(url: URL): Promise<Response> {
       "cache-control": `private, max-age=${ttl}`,
     });
   } catch (error) {
-    return json({ ok: false, source: "vortex", error: String((error as Error).message ?? error) }, 502);
+    return json({ ok: false, source, error: String((error as Error).message ?? error) }, 502);
   }
+}
+
+function sanitizeSource(source: string | null): string {
+  const clean = source?.trim().toLowerCase();
+  if (!clean || clean === "default") return "vortex";
+  return clean.replace(/[^a-z0-9-]/g, "");
 }
 
 async function handleStream(request: Request): Promise<Response> {

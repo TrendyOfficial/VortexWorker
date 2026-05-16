@@ -279,6 +279,7 @@ var VIDZEE_KEY_URL = "https://core.vidzee.wtf/api-key";
 var VIDZEE_KEY_SECRET = "4f2a9c7d1e8b3a6f0d5c2e9a7b1f4d8c";
 var ENCRYPT_API_BASE = "https://enc-dec.app/api";
 var VIDLINK_API_BASE = "https://vidlink.pro/api/b";
+var GOAT_LIGHTNING_BASE = "https://goatapi.imreallydagoatt.workers.dev/api/lightning";
 var VIDLINK_HEADERS = {
   Referer: "https://vidlink.pro/",
   Origin: "https://vidlink.pro"
@@ -290,6 +291,22 @@ var VORTEX_SERVERS = [
   { id: "vortex-nflix", label: "Vortex Nflix", sr: "4" },
   { id: "vortex-drag", label: "Vortex Drag", sr: "5" }
 ];
+var BRIDGE_SOURCE_LABELS = {
+  vidfast: "Mars API",
+  vidapi: "Vid API",
+  vidking: "Vidking",
+  "vidsrc-cc": "VidSrc",
+  "2embed": "Embed",
+  prime: "Prime"
+};
+var LIGHTNING_SOURCE_ORDER = {
+  vidfast: ["vidnest"],
+  vidapi: ["videasy", "vidnest"],
+  vidking: ["xpass", "videasy", "vidnest"],
+  "vidsrc-cc": ["vidnest", "xpass", "videasy"],
+  "2embed": ["videasy", "xpass", "vidnest"],
+  prime: ["vidnest", "videasy", "xpass"]
+};
 async function fetchWithTimeout2(url, init = {}) {
   const { timeout = 8e3, ...rest } = init;
   const ctl = new AbortController();
@@ -452,6 +469,15 @@ async function resolveVidzee(kind, id, season, episode) {
   );
   return settled.filter((stream) => !!stream);
 }
+async function resolveVidzeeSelected(sourceId, servers, kind, id, season, episode) {
+  const apiKey = await getVidzeeKey();
+  if (!apiKey) return [];
+  const selected = VORTEX_SERVERS.filter((server2) => servers.includes(server2.id));
+  const settled = await Promise.all(
+    selected.map((server2) => resolveVidzeeServer(kind, id, apiKey, server2, season, episode))
+  );
+  return asBridgeStreams(sourceId, settled.filter((stream) => !!stream), "vidzee");
+}
 async function encryptVidlinkId(id) {
   const url = new URL(`${ENCRYPT_API_BASE}/enc-vidlink`);
   url.searchParams.set("text", id);
@@ -506,6 +532,82 @@ async function resolveVidlink(kind, id, season, episode) {
   } catch {
     return [];
   }
+}
+function isLikelyHls(url, type) {
+  const lower = `${type ?? ""} ${url}`.toLowerCase();
+  return lower.includes("m3u8") || lower.includes("mpegurl") || lower.includes("master.") || lower.includes("getm3u8");
+}
+function qualityRank(quality) {
+  const text = quality ?? "";
+  if (/2160|4k/i.test(text)) return 4e3;
+  const match = text.match(/(\d{3,4})p?/i);
+  if (match) return Number(match[1]);
+  if (/auto/i.test(text)) return 1;
+  return 0;
+}
+function fromLightningStream(stream, sourceId, index) {
+  if (!stream.url) return null;
+  const labelBase = BRIDGE_SOURCE_LABELS[sourceId] ?? sourceId;
+  const label = stream.source ? `${labelBase} - ${stream.source}` : labelBase;
+  const headers = stream.referer ? {
+    Referer: stream.referer,
+    Origin: new URL(stream.referer).origin
+  } : void 0;
+  if (isLikelyHls(stream.url, stream.type)) {
+    return {
+      id: `${sourceId}-${index}`,
+      label,
+      type: "hls",
+      playlist: stream.url,
+      captions: [],
+      headers,
+      upstream: `${sourceId}/lightning`
+    };
+  }
+  const quality = stream.quality && !/auto/i.test(stream.quality) ? stream.quality : "auto";
+  return {
+    id: `${sourceId}-${index}`,
+    label,
+    type: "file",
+    qualities: {
+      [quality]: {
+        type: "mp4",
+        url: stream.url
+      }
+    },
+    captions: [],
+    headers,
+    upstream: `${sourceId}/lightning`
+  };
+}
+async function resolveLightning(kind, sourceId, tmdbId, season, episode) {
+  const candidates = LIGHTNING_SOURCE_ORDER[sourceId] ?? [];
+  const collected = [];
+  for (const candidate of candidates) {
+    try {
+      const url = kind === "movie" ? new URL(`${GOAT_LIGHTNING_BASE}/movie/${tmdbId}`) : new URL(`${GOAT_LIGHTNING_BASE}/tv/${tmdbId}/${season}/${episode}`);
+      url.searchParams.set("source", candidate);
+      url.searchParams.set("lang", "English");
+      const res = await fetchWithTimeout2(url.toString(), {
+        timeout: 6500,
+        headers: {
+          Referer: "https://goatapi.imreallydagoatt.workers.dev/docs",
+          Origin: "https://goatapi.imreallydagoatt.workers.dev"
+        }
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const streams = (data.streams ?? []).map((stream, index) => fromLightningStream(stream, sourceId, index)).filter((stream) => !!stream).sort((a, b) => {
+        const aq = a.type === "file" ? Object.keys(a.qualities ?? {})[0] : "auto";
+        const bq = b.type === "file" ? Object.keys(b.qualities ?? {})[0] : "auto";
+        return qualityRank(bq) - qualityRank(aq);
+      });
+      collected.push(...streams);
+      if (collected.length > 0) break;
+    } catch {
+    }
+  }
+  return uniqueStreams(collected);
 }
 async function timed(promise, timeout, fallback) {
   let timer;
@@ -596,6 +698,29 @@ async function resolveVortexMovie(tmdbId) {
     ms: Date.now() - start
   };
 }
+function asBridgeStreams(sourceId, streams, upstream) {
+  const labelBase = BRIDGE_SOURCE_LABELS[sourceId] ?? sourceId;
+  return uniqueStreams(streams).map((stream, index) => ({
+    ...stream,
+    id: `${sourceId}-${stream.id ?? index}`,
+    label: `${labelBase}${stream.label ? ` - ${stream.label.replace(/^Vortex\s*/i, "")}` : ""}`,
+    upstream: `${sourceId}/${upstream}`
+  }));
+}
+async function resolveVortexMovieBySource(tmdbId, sourceId) {
+  const start = Date.now();
+  const streams = await resolveBridgeMovie(sourceId, tmdbId);
+  if (streams.length === 0) throw new Error(`${BRIDGE_SOURCE_LABELS[sourceId] ?? sourceId} returned no stream`);
+  return {
+    ok: true,
+    source: sourceId,
+    kind: "movie",
+    params: { id: tmdbId, source: sourceId },
+    primary: streams[0],
+    streams,
+    ms: Date.now() - start
+  };
+}
 async function resolveVortexTv(tmdbId, season, episode) {
   const start = Date.now();
   const db = await resolveEntry("tv", tmdbId, season, episode);
@@ -631,6 +756,73 @@ async function resolveVortexTv(tmdbId, season, episode) {
     streams,
     ms: Date.now() - start
   };
+}
+async function resolveVortexTvBySource(tmdbId, season, episode, sourceId) {
+  const start = Date.now();
+  const streams = await resolveBridgeTv(sourceId, tmdbId, season, episode);
+  if (streams.length === 0)
+    throw new Error(`${BRIDGE_SOURCE_LABELS[sourceId] ?? sourceId} returned no stream for S${season}E${episode}`);
+  return {
+    ok: true,
+    source: sourceId,
+    kind: "tv",
+    params: { id: tmdbId, season, episode, source: sourceId },
+    primary: streams[0],
+    streams,
+    ms: Date.now() - start
+  };
+}
+async function resolveBridgeMovie(sourceId, tmdbId) {
+  if (sourceId === "vidfast") {
+    const streams = await resolveLightning("movie", sourceId, tmdbId);
+    return streams.length > 0 ? streams : asBridgeStreams(sourceId, await resolveVidlink("movie", tmdbId), "vidlink");
+  }
+  if (sourceId === "vidapi") {
+    try {
+      const result = await resolveMovie(tmdbId);
+      const streams = asBridgeStreams(sourceId, result.streams?.length ? result.streams : [result.primary], "vertex");
+      if (streams.length > 0) return streams;
+    } catch {
+    }
+    return resolveLightning("movie", sourceId, tmdbId);
+  }
+  if (sourceId === "vidking") return resolveVidzeeSelected(sourceId, ["vortex-togi"], "movie", tmdbId);
+  if (sourceId === "vidsrc-cc") {
+    const streams = await resolveVidzeeSelected(sourceId, ["vortex-achilles"], "movie", tmdbId);
+    return streams.length > 0 ? streams : resolveLightning("movie", sourceId, tmdbId);
+  }
+  if (sourceId === "2embed") return resolveVidzeeSelected(sourceId, ["vortex-nflix"], "movie", tmdbId);
+  if (sourceId === "prime") {
+    const streams = await resolveVidzeeSelected(sourceId, ["vortex-drag"], "movie", tmdbId);
+    return streams.length > 0 ? streams : resolveLightning("movie", sourceId, tmdbId);
+  }
+  return [];
+}
+async function resolveBridgeTv(sourceId, tmdbId, season, episode) {
+  if (sourceId === "vidfast") {
+    const streams = await resolveLightning("tv", sourceId, tmdbId, season, episode);
+    return streams.length > 0 ? streams : asBridgeStreams(sourceId, await resolveVidlink("tv", tmdbId, season, episode), "vidlink");
+  }
+  if (sourceId === "vidapi") {
+    try {
+      const result = await resolveTv(tmdbId, season, episode);
+      const streams = asBridgeStreams(sourceId, result.streams?.length ? result.streams : [result.primary], "vertex");
+      if (streams.length > 0) return streams;
+    } catch {
+    }
+    return resolveLightning("tv", sourceId, tmdbId, season, episode);
+  }
+  if (sourceId === "vidking") return resolveVidzeeSelected(sourceId, ["vortex-togi"], "tv", tmdbId, season, episode);
+  if (sourceId === "vidsrc-cc") {
+    const streams = await resolveVidzeeSelected(sourceId, ["vortex-achilles"], "tv", tmdbId, season, episode);
+    return streams.length > 0 ? streams : resolveLightning("tv", sourceId, tmdbId, season, episode);
+  }
+  if (sourceId === "2embed") return resolveVidzeeSelected(sourceId, ["vortex-nflix"], "tv", tmdbId, season, episode);
+  if (sourceId === "prime") {
+    const streams = await resolveVidzeeSelected(sourceId, ["vortex-drag"], "tv", tmdbId, season, episode);
+    return streams.length > 0 ? streams : resolveLightning("tv", sourceId, tmdbId, season, episode);
+  }
+  return [];
 }
 async function resolveVortexAnime(idOrSlug, episode, type) {
   const start = Date.now();
@@ -669,7 +861,9 @@ var index_default = {
         note: "API-only Worker. Prefer direct upstream stream URLs; /api/stream is a fallback.",
         routes: [
           "/api/vortex/movie/{tmdbId}",
+          "/api/vortex/movie/{tmdbId}?source={vortex|vidfast|vidking|vidapi|vidsrc-cc|2embed|prime}",
           "/api/vortex/tv/{tmdbId}/{season}/{episode}",
+          "/api/vortex/tv/{tmdbId}/{season}/{episode}?source={vortex|vidfast|vidking|vidapi|vidsrc-cc|2embed|prime}",
           "/api/vortex/anime/{id}/{episode}/{sub|dub}",
           "/api/movie/{tmdbId}",
           "/api/tv/{tmdbId}/{season}/{episode}",
@@ -700,19 +894,20 @@ function rewriteAlias(url, from, to) {
 async function handleVortex(url) {
   const segs = url.pathname.replace(/^\/api\/vortex\/?/, "").split("/").filter(Boolean);
   const ttl = Math.min(Math.max(Number(url.searchParams.get("ttl")) || 600, 30), 3600);
+  const source = sanitizeSource(url.searchParams.get("source"));
   try {
     const { data, cached } = await withCache(
       "vortex-stream",
-      segs.join("/"),
+      `${source}:${segs.join("/")}`,
       ttl,
       async () => {
         if (segs[0] === "movie") {
           if (!segs[1]) throw new Error("Missing tmdbId");
-          return resolveVortexMovie(segs[1]);
+          return source === "vortex" ? resolveVortexMovie(segs[1]) : resolveVortexMovieBySource(segs[1], source);
         }
         if (segs[0] === "tv") {
           if (!segs[1] || !segs[2] || !segs[3]) throw new Error("Missing tmdbId/season/episode");
-          return resolveVortexTv(segs[1], segs[2], segs[3]);
+          return source === "vortex" ? resolveVortexTv(segs[1], segs[2], segs[3]) : resolveVortexTvBySource(segs[1], segs[2], segs[3], source);
         }
         if (segs[0] === "anime") {
           if (!segs[1] || !segs[2]) throw new Error("Missing id/episode");
@@ -727,8 +922,13 @@ async function handleVortex(url) {
       "cache-control": `private, max-age=${ttl}`
     });
   } catch (error) {
-    return json({ ok: false, source: "vortex", error: String(error.message ?? error) }, 502);
+    return json({ ok: false, source, error: String(error.message ?? error) }, 502);
   }
+}
+function sanitizeSource(source) {
+  const clean = source?.trim().toLowerCase();
+  if (!clean || clean === "default") return "vortex";
+  return clean.replace(/[^a-z0-9-]/g, "");
 }
 async function handleStream(request) {
   const url = new URL(request.url);

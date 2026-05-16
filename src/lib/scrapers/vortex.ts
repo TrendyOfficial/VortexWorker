@@ -468,7 +468,7 @@ export async function resolveVortexMovie(tmdbId: string): Promise<VortexResult> 
     timed(resolveVidzee("movie", tmdbId), 7000, []),
     timed(resolveVidlink("movie", tmdbId), 7000, []),
   ]);
-  let streams = uniqueStreams([...vidzeeStreams, ...linkStreams]);
+  let streams = uniqueStreams([...linkStreams, ...vidzeeStreams]);
   streams = await withVertexFallback(streams, () => resolveVertexMovie(tmdbId));
   if (streams.length === 0) throw new Error("Vortex could not resolve a stream for this movie");
 

@@ -25,7 +25,6 @@ const VIDZEE_KEY_URL = "https://core.vidzee.wtf/api-key";
 const VIDZEE_KEY_SECRET = "4f2a9c7d1e8b3a6f0d5c2e9a7b1f4d8c";
 const ENCRYPT_API_BASE = "https://enc-dec.app/api";
 const VIDLINK_API_BASE = "https://vidlink.pro/api/b";
-const GOAT_LIGHTNING_BASE = "https://goatapi.imreallydagoatt.workers.dev/api/lightning";
 const VIDLINK_HEADERS = {
   Referer: "https://vidlink.pro/",
   Origin: "https://vidlink.pro",
@@ -69,22 +68,6 @@ type VidlinkResponse = {
   };
 };
 
-type LightningStream = {
-  source?: string;
-  type?: string;
-  url?: string;
-  quality?: string;
-  referer?: string;
-  language?: string;
-};
-
-type LightningResponse = {
-  success?: boolean;
-  error?: string;
-  provider?: string;
-  streams?: LightningStream[];
-};
-
 const BRIDGE_SOURCE_LABELS: Record<string, string> = {
   vidfast: "Mars API",
   vidapi: "Vid API",
@@ -92,15 +75,6 @@ const BRIDGE_SOURCE_LABELS: Record<string, string> = {
   "vidsrc-cc": "VidSrc",
   "2embed": "Embed",
   prime: "Prime",
-};
-
-const LIGHTNING_SOURCE_ORDER: Record<string, string[]> = {
-  vidfast: ["vidnest"],
-  vidapi: ["videasy", "vidnest"],
-  vidking: ["xpass", "videasy", "vidnest"],
-  "vidsrc-cc": ["vidnest", "xpass", "videasy"],
-  "2embed": ["videasy", "xpass", "vidnest"],
-  prime: ["vidnest", "videasy", "xpass"],
 };
 
 async function fetchWithTimeout(url: string, init: RequestInit & { timeout?: number } = {}) {
@@ -401,109 +375,6 @@ async function resolveVidlink(
   }
 }
 
-function isLikelyHls(url: string, type?: string): boolean {
-  const lower = `${type ?? ""} ${url}`.toLowerCase();
-  return lower.includes("m3u8") || lower.includes("mpegurl") || lower.includes("master.") || lower.includes("getm3u8");
-}
-
-function qualityRank(quality: string | undefined): number {
-  const text = quality ?? "";
-  if (/2160|4k/i.test(text)) return 4000;
-  const match = text.match(/(\d{3,4})p?/i);
-  if (match) return Number(match[1]);
-  if (/auto/i.test(text)) return 1;
-  return 0;
-}
-
-function fromLightningStream(stream: LightningStream, sourceId: string, index: number): VortexStream | null {
-  if (!stream.url) return null;
-
-  const labelBase = BRIDGE_SOURCE_LABELS[sourceId] ?? sourceId;
-  const label = stream.source ? `${labelBase} - ${stream.source}` : labelBase;
-  const headers = stream.referer
-    ? {
-        Referer: stream.referer,
-        Origin: new URL(stream.referer).origin,
-      }
-    : undefined;
-
-  if (isLikelyHls(stream.url, stream.type)) {
-    return {
-      id: `${sourceId}-${index}`,
-      label,
-      type: "hls",
-      playlist: stream.url,
-      captions: [],
-      headers,
-      upstream: `${sourceId}/lightning`,
-    };
-  }
-
-  const quality = stream.quality && !/auto/i.test(stream.quality) ? stream.quality : "auto";
-  return {
-    id: `${sourceId}-${index}`,
-    label,
-    type: "file",
-    qualities: {
-      [quality]: {
-        type: "mp4",
-        url: stream.url,
-      },
-    },
-    captions: [],
-    headers,
-    upstream: `${sourceId}/lightning`,
-  };
-}
-
-async function resolveLightning(
-  kind: "movie" | "tv",
-  sourceId: string,
-  tmdbId: string,
-  season?: string,
-  episode?: string,
-): Promise<VortexStream[]> {
-  const candidates = LIGHTNING_SOURCE_ORDER[sourceId] ?? [];
-  const collected: VortexStream[] = [];
-
-  for (const candidate of candidates) {
-    try {
-      const url =
-        kind === "movie"
-          ? new URL(`${GOAT_LIGHTNING_BASE}/movie/${tmdbId}`)
-          : new URL(`${GOAT_LIGHTNING_BASE}/tv/${tmdbId}/${season}/${episode}`);
-      url.searchParams.set("source", candidate);
-      url.searchParams.set("lang", "English");
-
-      const res = await fetchWithTimeout(url.toString(), {
-        timeout: 6500,
-        headers: {
-          Referer: "https://goatapi.imreallydagoatt.workers.dev/docs",
-          Origin: "https://goatapi.imreallydagoatt.workers.dev",
-        },
-      });
-      if (!res.ok) continue;
-
-      const data = (await res.json()) as LightningResponse;
-      const streams = (data.streams ?? [])
-        .map((stream, index) => fromLightningStream(stream, sourceId, index))
-        .filter((stream): stream is VortexStream => !!stream)
-        .sort((a, b) => {
-          const aq = a.type === "file" ? Object.keys(a.qualities ?? {})[0] : "auto";
-          const bq = b.type === "file" ? Object.keys(b.qualities ?? {})[0] : "auto";
-          return qualityRank(bq) - qualityRank(aq);
-        });
-
-      collected.push(...streams);
-      if (collected.length > 0) break;
-    } catch {
-      // Try the next provider candidate. GoatAPI rate-limits aggressively, so keep this sequential.
-    }
-  }
-
-  return uniqueStreams(collected);
-}
-
 async function timed<T>(promise: Promise<T>, timeout: number, fallback: T): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -704,30 +575,10 @@ export async function resolveVortexTvBySource(
 }
 
 async function resolveBridgeMovie(sourceId: string, tmdbId: string): Promise<VortexStream[]> {
-  if (sourceId === "vidfast") {
-    const streams = await resolveLightning("movie", sourceId, tmdbId);
-    return streams.length > 0 ? streams : asBridgeStreams(sourceId, await resolveVidlink("movie", tmdbId), "vidlink");
-  }
-  if (sourceId === "vidapi") {
-    try {
-      const result = await resolveVertexMovie(tmdbId);
-      const streams = asBridgeStreams(sourceId, result.streams?.length ? result.streams : [result.primary], "vertex");
-      if (streams.length > 0) return streams;
-    } catch {
-      // Consumet/FlixHQ coverage is uneven. Keep this source usable without making it an alias of Vortex.
-    }
-    return resolveLightning("movie", sourceId, tmdbId);
-  }
-  if (sourceId === "vidking") return resolveVidzeeSelected(sourceId, ["vortex-togi"], "movie", tmdbId);
-  if (sourceId === "vidsrc-cc") {
-    const streams = await resolveVidzeeSelected(sourceId, ["vortex-achilles"], "movie", tmdbId);
-    return streams.length > 0 ? streams : resolveLightning("movie", sourceId, tmdbId);
-  }
-  if (sourceId === "2embed") return resolveVidzeeSelected(sourceId, ["vortex-nflix"], "movie", tmdbId);
-  if (sourceId === "prime") {
-    const streams = await resolveVidzeeSelected(sourceId, ["vortex-drag"], "movie", tmdbId);
-    return streams.length > 0 ? streams : resolveLightning("movie", sourceId, tmdbId);
-  }
+  // These labels must not silently route to GoatAPI/Lightning or Vortex. Each source
+  // needs a real extractor for its own public player/API before it can be enabled here.
+  void sourceId;
+  void tmdbId;
   return [];
 }
 
@@ -737,33 +588,12 @@ async function resolveBridgeTv(
   season: string,
   episode: string,
 ): Promise<VortexStream[]> {
-  if (sourceId === "vidfast") {
-    const streams = await resolveLightning("tv", sourceId, tmdbId, season, episode);
-    return streams.length > 0
-      ? streams
-      : asBridgeStreams(sourceId, await resolveVidlink("tv", tmdbId, season, episode), "vidlink");
-  }
-  if (sourceId === "vidapi") {
-    try {
-      const result = await resolveVertexTv(tmdbId, season, episode);
-      const streams = asBridgeStreams(sourceId, result.streams?.length ? result.streams : [result.primary], "vertex");
-      if (streams.length > 0) return streams;
-    } catch {
-      // Consumet/FlixHQ coverage is uneven. Keep this source usable without making it an alias of Vortex.
-    }
-    return resolveLightning("tv", sourceId, tmdbId, season, episode);
-  }
-  if (sourceId === "vidking") return resolveVidzeeSelected(sourceId, ["vortex-togi"], "tv", tmdbId, season, episode);
-  if (sourceId === "vidsrc-cc")
-    {
-      const streams = await resolveVidzeeSelected(sourceId, ["vortex-achilles"], "tv", tmdbId, season, episode);
-      return streams.length > 0 ? streams : resolveLightning("tv", sourceId, tmdbId, season, episode);
-    }
-  if (sourceId === "2embed") return resolveVidzeeSelected(sourceId, ["vortex-nflix"], "tv", tmdbId, season, episode);
-  if (sourceId === "prime") {
-    const streams = await resolveVidzeeSelected(sourceId, ["vortex-drag"], "tv", tmdbId, season, episode);
-    return streams.length > 0 ? streams : resolveLightning("tv", sourceId, tmdbId, season, episode);
-  }
+  // These labels must not silently route to GoatAPI/Lightning or Vortex. Each source
+  // needs a real extractor for its own public player/API before it can be enabled here.
+  void sourceId;
+  void tmdbId;
+  void season;
+  void episode;
   return [];
 }
 

@@ -279,7 +279,6 @@ var VIDZEE_KEY_URL = "https://core.vidzee.wtf/api-key";
 var VIDZEE_KEY_SECRET = "4f2a9c7d1e8b3a6f0d5c2e9a7b1f4d8c";
 var ENCRYPT_API_BASE = "https://enc-dec.app/api";
 var VIDLINK_API_BASE = "https://vidlink.pro/api/b";
-var GOAT_LIGHTNING_BASE = "https://goatapi.imreallydagoatt.workers.dev/api/lightning";
 var VIDLINK_HEADERS = {
   Referer: "https://vidlink.pro/",
   Origin: "https://vidlink.pro"
@@ -298,14 +297,6 @@ var BRIDGE_SOURCE_LABELS = {
   "vidsrc-cc": "VidSrc",
   "2embed": "Embed",
   prime: "Prime"
-};
-var LIGHTNING_SOURCE_ORDER = {
-  vidfast: ["vidnest"],
-  vidapi: ["videasy", "vidnest"],
-  vidking: ["xpass", "videasy", "vidnest"],
-  "vidsrc-cc": ["vidnest", "xpass", "videasy"],
-  "2embed": ["videasy", "xpass", "vidnest"],
-  prime: ["vidnest", "videasy", "xpass"]
 };
 async function fetchWithTimeout2(url, init = {}) {
   const { timeout = 8e3, ...rest } = init;
@@ -469,15 +460,6 @@ async function resolveVidzee(kind, id, season, episode) {
   );
   return settled.filter((stream) => !!stream);
 }
-async function resolveVidzeeSelected(sourceId, servers, kind, id, season, episode) {
-  const apiKey = await getVidzeeKey();
-  if (!apiKey) return [];
-  const selected = VORTEX_SERVERS.filter((server2) => servers.includes(server2.id));
-  const settled = await Promise.all(
-    selected.map((server2) => resolveVidzeeServer(kind, id, apiKey, server2, season, episode))
-  );
-  return asBridgeStreams(sourceId, settled.filter((stream) => !!stream), "vidzee");
-}
 async function encryptVidlinkId(id) {
   const url = new URL(`${ENCRYPT_API_BASE}/enc-vidlink`);
   url.searchParams.set("text", id);
@@ -532,82 +514,6 @@ async function resolveVidlink(kind, id, season, episode) {
   } catch {
     return [];
   }
-}
-function isLikelyHls(url, type) {
-  const lower = `${type ?? ""} ${url}`.toLowerCase();
-  return lower.includes("m3u8") || lower.includes("mpegurl") || lower.includes("master.") || lower.includes("getm3u8");
-}
-function qualityRank(quality) {
-  const text = quality ?? "";
-  if (/2160|4k/i.test(text)) return 4e3;
-  const match = text.match(/(\d{3,4})p?/i);
-  if (match) return Number(match[1]);
-  if (/auto/i.test(text)) return 1;
-  return 0;
-}
-function fromLightningStream(stream, sourceId, index) {
-  if (!stream.url) return null;
-  const labelBase = BRIDGE_SOURCE_LABELS[sourceId] ?? sourceId;
-  const label = stream.source ? `${labelBase} - ${stream.source}` : labelBase;
-  const headers = stream.referer ? {
-    Referer: stream.referer,
-    Origin: new URL(stream.referer).origin
-  } : void 0;
-  if (isLikelyHls(stream.url, stream.type)) {
-    return {
-      id: `${sourceId}-${index}`,
-      label,
-      type: "hls",
-      playlist: stream.url,
-      captions: [],
-      headers,
-      upstream: `${sourceId}/lightning`
-    };
-  }
-  const quality = stream.quality && !/auto/i.test(stream.quality) ? stream.quality : "auto";
-  return {
-    id: `${sourceId}-${index}`,
-    label,
-    type: "file",
-    qualities: {
-      [quality]: {
-        type: "mp4",
-        url: stream.url
-      }
-    },
-    captions: [],
-    headers,
-    upstream: `${sourceId}/lightning`
-  };
-}
-async function resolveLightning(kind, sourceId, tmdbId, season, episode) {
-  const candidates = LIGHTNING_SOURCE_ORDER[sourceId] ?? [];
-  const collected = [];
-  for (const candidate of candidates) {
-    try {
-      const url = kind === "movie" ? new URL(`${GOAT_LIGHTNING_BASE}/movie/${tmdbId}`) : new URL(`${GOAT_LIGHTNING_BASE}/tv/${tmdbId}/${season}/${episode}`);
-      url.searchParams.set("source", candidate);
-      url.searchParams.set("lang", "English");
-      const res = await fetchWithTimeout2(url.toString(), {
-        timeout: 6500,
-        headers: {
-          Referer: "https://goatapi.imreallydagoatt.workers.dev/docs",
-          Origin: "https://goatapi.imreallydagoatt.workers.dev"
-        }
-      });
-      if (!res.ok) continue;
-      const data = await res.json();
-      const streams = (data.streams ?? []).map((stream, index) => fromLightningStream(stream, sourceId, index)).filter((stream) => !!stream).sort((a, b) => {
-        const aq = a.type === "file" ? Object.keys(a.qualities ?? {})[0] : "auto";
-        const bq = b.type === "file" ? Object.keys(b.qualities ?? {})[0] : "auto";
-        return qualityRank(bq) - qualityRank(aq);
-      });
-      collected.push(...streams);
-      if (collected.length > 0) break;
-    } catch {
-    }
-  }
-  return uniqueStreams(collected);
 }
 async function timed(promise, timeout, fallback) {
   let timer;
@@ -698,15 +604,6 @@ async function resolveVortexMovie(tmdbId) {
     ms: Date.now() - start
   };
 }
-function asBridgeStreams(sourceId, streams, upstream) {
-  const labelBase = BRIDGE_SOURCE_LABELS[sourceId] ?? sourceId;
-  return uniqueStreams(streams).map((stream, index) => ({
-    ...stream,
-    id: `${sourceId}-${stream.id ?? index}`,
-    label: `${labelBase}${stream.label ? ` - ${stream.label.replace(/^Vortex\s*/i, "")}` : ""}`,
-    upstream: `${sourceId}/${upstream}`
-  }));
-}
 async function resolveVortexMovieBySource(tmdbId, sourceId) {
   const start = Date.now();
   const streams = await resolveBridgeMovie(sourceId, tmdbId);
@@ -773,55 +670,15 @@ async function resolveVortexTvBySource(tmdbId, season, episode, sourceId) {
   };
 }
 async function resolveBridgeMovie(sourceId, tmdbId) {
-  if (sourceId === "vidfast") {
-    const streams = await resolveLightning("movie", sourceId, tmdbId);
-    return streams.length > 0 ? streams : asBridgeStreams(sourceId, await resolveVidlink("movie", tmdbId), "vidlink");
-  }
-  if (sourceId === "vidapi") {
-    try {
-      const result = await resolveMovie(tmdbId);
-      const streams = asBridgeStreams(sourceId, result.streams?.length ? result.streams : [result.primary], "vertex");
-      if (streams.length > 0) return streams;
-    } catch {
-    }
-    return resolveLightning("movie", sourceId, tmdbId);
-  }
-  if (sourceId === "vidking") return resolveVidzeeSelected(sourceId, ["vortex-togi"], "movie", tmdbId);
-  if (sourceId === "vidsrc-cc") {
-    const streams = await resolveVidzeeSelected(sourceId, ["vortex-achilles"], "movie", tmdbId);
-    return streams.length > 0 ? streams : resolveLightning("movie", sourceId, tmdbId);
-  }
-  if (sourceId === "2embed") return resolveVidzeeSelected(sourceId, ["vortex-nflix"], "movie", tmdbId);
-  if (sourceId === "prime") {
-    const streams = await resolveVidzeeSelected(sourceId, ["vortex-drag"], "movie", tmdbId);
-    return streams.length > 0 ? streams : resolveLightning("movie", sourceId, tmdbId);
-  }
+  void sourceId;
+  void tmdbId;
   return [];
 }
 async function resolveBridgeTv(sourceId, tmdbId, season, episode) {
-  if (sourceId === "vidfast") {
-    const streams = await resolveLightning("tv", sourceId, tmdbId, season, episode);
-    return streams.length > 0 ? streams : asBridgeStreams(sourceId, await resolveVidlink("tv", tmdbId, season, episode), "vidlink");
-  }
-  if (sourceId === "vidapi") {
-    try {
-      const result = await resolveTv(tmdbId, season, episode);
-      const streams = asBridgeStreams(sourceId, result.streams?.length ? result.streams : [result.primary], "vertex");
-      if (streams.length > 0) return streams;
-    } catch {
-    }
-    return resolveLightning("tv", sourceId, tmdbId, season, episode);
-  }
-  if (sourceId === "vidking") return resolveVidzeeSelected(sourceId, ["vortex-togi"], "tv", tmdbId, season, episode);
-  if (sourceId === "vidsrc-cc") {
-    const streams = await resolveVidzeeSelected(sourceId, ["vortex-achilles"], "tv", tmdbId, season, episode);
-    return streams.length > 0 ? streams : resolveLightning("tv", sourceId, tmdbId, season, episode);
-  }
-  if (sourceId === "2embed") return resolveVidzeeSelected(sourceId, ["vortex-nflix"], "tv", tmdbId, season, episode);
-  if (sourceId === "prime") {
-    const streams = await resolveVidzeeSelected(sourceId, ["vortex-drag"], "tv", tmdbId, season, episode);
-    return streams.length > 0 ? streams : resolveLightning("tv", sourceId, tmdbId, season, episode);
-  }
+  void sourceId;
+  void tmdbId;
+  void season;
+  void episode;
   return [];
 }
 async function resolveVortexAnime(idOrSlug, episode, type) {

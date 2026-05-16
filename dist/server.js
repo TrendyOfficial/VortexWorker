@@ -671,6 +671,8 @@ var index_default = {
           "/api/vortex/movie/{tmdbId}",
           "/api/vortex/tv/{tmdbId}/{season}/{episode}",
           "/api/vortex/anime/{id}/{episode}/{sub|dub}",
+          "/api/movie/{tmdbId}",
+          "/api/tv/{tmdbId}/{season}/{episode}",
           "/api/stream?url={encodedUrl}"
         ]
       });
@@ -678,12 +680,23 @@ var index_default = {
     if (url.pathname.startsWith("/api/vortex/")) {
       return handleVortex(url);
     }
+    if (url.pathname.startsWith("/api/movie/")) {
+      return handleVortex(rewriteAlias(url, "/api/movie/", "/api/vortex/movie/"));
+    }
+    if (url.pathname.startsWith("/api/tv/")) {
+      return handleVortex(rewriteAlias(url, "/api/tv/", "/api/vortex/tv/"));
+    }
     if (url.pathname.startsWith("/api/stream")) {
       return handleStream(request);
     }
     return json({ ok: false, error: "Not found" }, 404);
   }
 };
+function rewriteAlias(url, from, to) {
+  const next = new URL(url.toString());
+  next.pathname = next.pathname.replace(from, to);
+  return next;
+}
 async function handleVortex(url) {
   const segs = url.pathname.replace(/^\/api\/vortex\/?/, "").split("/").filter(Boolean);
   const ttl = Math.min(Math.max(Number(url.searchParams.get("ttl")) || 600, 30), 3600);

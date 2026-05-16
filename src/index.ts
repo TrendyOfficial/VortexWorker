@@ -33,6 +33,8 @@ export default {
           "/api/vortex/movie/{tmdbId}",
           "/api/vortex/tv/{tmdbId}/{season}/{episode}",
           "/api/vortex/anime/{id}/{episode}/{sub|dub}",
+          "/api/movie/{tmdbId}",
+          "/api/tv/{tmdbId}/{season}/{episode}",
           "/api/stream?url={encodedUrl}",
         ],
       });
@@ -42,6 +44,14 @@ export default {
       return handleVortex(url);
     }
 
+    if (url.pathname.startsWith("/api/movie/")) {
+      return handleVortex(rewriteAlias(url, "/api/movie/", "/api/vortex/movie/"));
+    }
+
+    if (url.pathname.startsWith("/api/tv/")) {
+      return handleVortex(rewriteAlias(url, "/api/tv/", "/api/vortex/tv/"));
+    }
+
     if (url.pathname.startsWith("/api/stream")) {
       return handleStream(request);
     }
@@ -49,6 +59,12 @@ export default {
     return json({ ok: false, error: "Not found" }, 404);
   },
 };
+
+function rewriteAlias(url: URL, from: string, to: string): URL {
+  const next = new URL(url.toString());
+  next.pathname = next.pathname.replace(from, to);
+  return next;
+}
 
 async function handleVortex(url: URL): Promise<Response> {
   const segs = url.pathname.replace(/^\/api\/vortex\/?/, "").split("/").filter(Boolean);

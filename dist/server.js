@@ -295,6 +295,8 @@ var BRIDGE_SOURCE_LABELS = {
   vidapi: "Vid API",
   vidking: "Vidking",
   "vidsrc-cc": "VidSrc",
+  "vidsrc-to": "VidSrc",
+  vidsrc: "VidSrc",
   "2embed": "Embed",
   prime: "Prime"
 };
@@ -460,6 +462,15 @@ async function resolveVidzee(kind, id, season, episode) {
   );
   return settled.filter((stream) => !!stream);
 }
+async function resolveVidzeeSelected(sourceId, servers, kind, id, season, episode) {
+  const apiKey = await getVidzeeKey();
+  if (!apiKey) return [];
+  const selected = VORTEX_SERVERS.filter((server2) => servers.includes(server2.id));
+  const settled = await Promise.all(
+    selected.map((server2) => resolveVidzeeServer(kind, id, apiKey, server2, season, episode))
+  );
+  return asBridgeStreams(sourceId, settled.filter((stream) => !!stream), "vidzee");
+}
 async function encryptVidlinkId(id) {
   const url = new URL(`${ENCRYPT_API_BASE}/enc-vidlink`);
   url.searchParams.set("text", id);
@@ -604,6 +615,15 @@ async function resolveVortexMovie(tmdbId) {
     ms: Date.now() - start
   };
 }
+function asBridgeStreams(sourceId, streams, upstream) {
+  const labelBase = BRIDGE_SOURCE_LABELS[sourceId] ?? sourceId;
+  return uniqueStreams(streams).map((stream, index) => ({
+    ...stream,
+    id: `${sourceId}-${stream.id ?? index}`,
+    label: `${labelBase}${stream.label ? ` - ${stream.label.replace(/^Vortex\s*/i, "")}` : ""}`,
+    upstream: `${sourceId}/${upstream}`
+  }));
+}
 async function resolveVortexMovieBySource(tmdbId, sourceId) {
   const start = Date.now();
   const streams = await resolveBridgeMovie(sourceId, tmdbId);
@@ -670,15 +690,21 @@ async function resolveVortexTvBySource(tmdbId, season, episode, sourceId) {
   };
 }
 async function resolveBridgeMovie(sourceId, tmdbId) {
-  void sourceId;
-  void tmdbId;
+  if (sourceId === "vidfast") {
+    return resolveVidzeeSelected(sourceId, ["vortex-nflix", "vortex-togi"], "movie", tmdbId);
+  }
+  if (sourceId === "vidsrc" || sourceId === "vidsrc-to") {
+    return resolveVidzeeSelected("vidsrc-to", ["vortex-achilles", "vortex-drag"], "movie", tmdbId);
+  }
   return [];
 }
 async function resolveBridgeTv(sourceId, tmdbId, season, episode) {
-  void sourceId;
-  void tmdbId;
-  void season;
-  void episode;
+  if (sourceId === "vidfast") {
+    return resolveVidzeeSelected(sourceId, ["vortex-nflix", "vortex-togi"], "tv", tmdbId, season, episode);
+  }
+  if (sourceId === "vidsrc" || sourceId === "vidsrc-to") {
+    return resolveVidzeeSelected("vidsrc-to", ["vortex-achilles", "vortex-drag"], "tv", tmdbId, season, episode);
+  }
   return [];
 }
 async function resolveVortexAnime(idOrSlug, episode, type) {
@@ -719,8 +745,12 @@ var index_default = {
         routes: [
           "/api/vortex/movie/{tmdbId}",
           "/api/vortex/movie/{tmdbId}?source={vortex|vidfast|vidking|vidapi|vidsrc-cc|2embed|prime}",
+          "/api/vortex/movie/{tmdbId}/{source}",
+          "/api/vidfast/movie/{tmdbId}",
+          "/api/vidfast/tv/{tmdbId}/{season}/{episode}",
           "/api/vortex/tv/{tmdbId}/{season}/{episode}",
           "/api/vortex/tv/{tmdbId}/{season}/{episode}?source={vortex|vidfast|vidking|vidapi|vidsrc-cc|2embed|prime}",
+          "/api/vortex/tv/{tmdbId}/{season}/{episode}/{source}",
           "/api/vortex/anime/{id}/{episode}/{sub|dub}",
           "/api/movie/{tmdbId}",
           "/api/tv/{tmdbId}/{season}/{episode}",
@@ -731,13 +761,20 @@ var index_default = {
     if (url.pathname.startsWith("/api/vortex/")) {
       return handleVortex(url);
     }
+    const sourceAlias = matchSourceAlias(url.pathname);
+    if (sourceAlias) {
+      const next = new URL(url.toString());
+      next.pathname = sourceAlias.rewrittenPath;
+      next.searchParams.set("source", sourceAlias.source);
+      return handleVortex(next);
+    }
     if (url.pathname.startsWith("/api/movie/")) {
       return handleVortex(rewriteAlias(url, "/api/movie/", "/api/vortex/movie/"));
     }
     if (url.pathname.startsWith("/api/tv/")) {
       return handleVortex(rewriteAlias(url, "/api/tv/", "/api/vortex/tv/"));
     }
-    if (url.pathname.startsWith("/api/stream")) {
+    if (url.pathname.startsWith("/api/stream") || url.pathname.startsWith("/m3u8-proxy")) {
       return handleStream(request);
     }
     return json({ ok: false, error: "Not found" }, 404);
@@ -748,10 +785,23 @@ function rewriteAlias(url, from, to) {
   next.pathname = next.pathname.replace(from, to);
   return next;
 }
+function matchSourceAlias(pathname) {
+  const segs = pathname.split("/").filter(Boolean);
+  const source = sanitizeSource(segs[1] ?? null);
+  if (segs[0] !== "api" || source === "vortex") return null;
+  if (segs[2] === "movie" && segs[3]) {
+    return { source, rewrittenPath: `/api/vortex/movie/${segs[3]}` };
+  }
+  if (segs[2] === "tv" && segs[3] && segs[4] && segs[5]) {
+    return { source, rewrittenPath: `/api/vortex/tv/${segs[3]}/${segs[4]}/${segs[5]}` };
+  }
+  return null;
+}
 async function handleVortex(url) {
   const segs = url.pathname.replace(/^\/api\/vortex\/?/, "").split("/").filter(Boolean);
   const ttl = Math.min(Math.max(Number(url.searchParams.get("ttl")) || 600, 30), 3600);
-  const source = sanitizeSource(url.searchParams.get("source"));
+  const pathSource = segs[0] === "movie" ? segs[2] : segs[0] === "tv" ? segs[4] : void 0;
+  const source = sanitizeSource(pathSource ?? url.searchParams.get("source"));
   try {
     const { data, cached } = await withCache(
       "vortex-stream",
@@ -800,11 +850,13 @@ async function handleStream(request) {
   const range = request.headers.get("range");
   const ref = url.searchParams.get("ref");
   const origin = url.searchParams.get("origin");
+  const providedHeaders = parseHeadersParam(url.searchParams.get("headers"));
   const headers = {
     "User-Agent": DEFAULT_UA,
     Accept: "*/*",
     Referer: ref || `${upstream.protocol}//${upstream.host}/`,
-    Origin: origin || `${upstream.protocol}//${upstream.host}`
+    Origin: origin || `${upstream.protocol}//${upstream.host}`,
+    ...providedHeaders
   };
   if (range) headers.Range = range;
   const response = await fetch(upstream.toString(), { method: request.method, headers });
@@ -826,6 +878,17 @@ async function handleStream(request) {
     headers: responseHeaders
   });
 }
+function parseHeadersParam(input) {
+  if (!input) return {};
+  try {
+    const parsed = JSON.parse(input);
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry) => typeof entry[1] === "string")
+    );
+  } catch {
+    return {};
+  }
+}
 function rewriteManifest(manifest, upstream, requestUrl) {
   const proxyBase = new URL(requestUrl);
   const ref = proxyBase.searchParams.get("ref");
@@ -835,6 +898,8 @@ function rewriteManifest(manifest, upstream, requestUrl) {
     const params = new URLSearchParams({ url: absoluteUrl });
     if (ref) params.set("ref", ref);
     if (origin) params.set("origin", origin);
+    const headers = proxyBase.searchParams.get("headers");
+    if (headers) params.set("headers", headers);
     return `${proxyBase.pathname}?${params.toString()}`;
   };
   return manifest.split("\n").map((line) => {

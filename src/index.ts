@@ -34,8 +34,12 @@ export default {
         routes: [
           "/api/vortex/movie/{tmdbId}",
           "/api/vortex/movie/{tmdbId}?source={vortex|vidfast|vidking|vidapi|vidsrc-cc|2embed|prime}",
+          "/api/vortex/movie/{tmdbId}/{source}",
+          "/api/vidfast/movie/{tmdbId}",
+          "/api/vidfast/tv/{tmdbId}/{season}/{episode}",
           "/api/vortex/tv/{tmdbId}/{season}/{episode}",
           "/api/vortex/tv/{tmdbId}/{season}/{episode}?source={vortex|vidfast|vidking|vidapi|vidsrc-cc|2embed|prime}",
+          "/api/vortex/tv/{tmdbId}/{season}/{episode}/{source}",
           "/api/vortex/anime/{id}/{episode}/{sub|dub}",
           "/api/movie/{tmdbId}",
           "/api/tv/{tmdbId}/{season}/{episode}",
@@ -48,6 +52,14 @@ export default {
       return handleVortex(url);
     }
 
+    const sourceAlias = matchSourceAlias(url.pathname);
+    if (sourceAlias) {
+      const next = new URL(url.toString());
+      next.pathname = sourceAlias.rewrittenPath;
+      next.searchParams.set("source", sourceAlias.source);
+      return handleVortex(next);
+    }
+
     if (url.pathname.startsWith("/api/movie/")) {
       return handleVortex(rewriteAlias(url, "/api/movie/", "/api/vortex/movie/"));
     }
@@ -56,7 +68,7 @@ export default {
       return handleVortex(rewriteAlias(url, "/api/tv/", "/api/vortex/tv/"));
     }
 
-    if (url.pathname.startsWith("/api/stream")) {
+    if (url.pathname.startsWith("/api/stream") || url.pathname.startsWith("/m3u8-proxy")) {
       return handleStream(request);
     }
 
@@ -70,10 +82,28 @@ function rewriteAlias(url: URL, from: string, to: string): URL {
   return next;
 }
 
+function matchSourceAlias(pathname: string): { source: string; rewrittenPath: string } | null {
+  const segs = pathname.split("/").filter(Boolean);
+  const source = sanitizeSource(segs[1] ?? null);
+  if (segs[0] !== "api" || source === "vortex") return null;
+
+  if (segs[2] === "movie" && segs[3]) {
+    return { source, rewrittenPath: `/api/vortex/movie/${segs[3]}` };
+  }
+
+  if (segs[2] === "tv" && segs[3] && segs[4] && segs[5]) {
+    return { source, rewrittenPath: `/api/vortex/tv/${segs[3]}/${segs[4]}/${segs[5]}` };
+  }
+
+  return null;
+}
+
 async function handleVortex(url: URL): Promise<Response> {
   const segs = url.pathname.replace(/^\/api\/vortex\/?/, "").split("/").filter(Boolean);
   const ttl = Math.min(Math.max(Number(url.searchParams.get("ttl")) || 600, 30), 3600);
-  const source = sanitizeSource(url.searchParams.get("source"));
+  const pathSource =
+    segs[0] === "movie" ? segs[2] : segs[0] === "tv" ? segs[4] : undefined;
+  const source = sanitizeSource(pathSource ?? url.searchParams.get("source"));
 
   try {
     const { data, cached } = await withCache<VortexResult>(
@@ -133,11 +163,13 @@ async function handleStream(request: Request): Promise<Response> {
   const range = request.headers.get("range");
   const ref = url.searchParams.get("ref");
   const origin = url.searchParams.get("origin");
+  const providedHeaders = parseHeadersParam(url.searchParams.get("headers"));
   const headers: Record<string, string> = {
     "User-Agent": DEFAULT_UA,
     Accept: "*/*",
     Referer: ref || `${upstream.protocol}//${upstream.host}/`,
     Origin: origin || `${upstream.protocol}//${upstream.host}`,
+    ...providedHeaders,
   };
   if (range) headers.Range = range;
 
@@ -165,6 +197,19 @@ async function handleStream(request: Request): Promise<Response> {
   });
 }
 
+function parseHeadersParam(input: string | null): Record<string, string> {
+  if (!input) return {};
+
+  try {
+    const parsed = JSON.parse(input) as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    );
+  } catch {
+    return {};
+  }
+}
+
 function rewriteManifest(manifest: string, upstream: URL, requestUrl: string): string {
   const proxyBase = new URL(requestUrl);
   const ref = proxyBase.searchParams.get("ref");
@@ -175,6 +220,8 @@ function rewriteManifest(manifest: string, upstream: URL, requestUrl: string): s
     const params = new URLSearchParams({ url: absoluteUrl });
     if (ref) params.set("ref", ref);
     if (origin) params.set("origin", origin);
+    const headers = proxyBase.searchParams.get("headers");
+    if (headers) params.set("headers", headers);
     return `${proxyBase.pathname}?${params.toString()}`;
   };
 

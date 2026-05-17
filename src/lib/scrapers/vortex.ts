@@ -73,6 +73,8 @@ const BRIDGE_SOURCE_LABELS: Record<string, string> = {
   vidapi: "Vid API",
   vidking: "Vidking",
   "vidsrc-cc": "VidSrc",
+  "vidsrc-to": "VidSrc",
+  vidsrc: "VidSrc",
   "2embed": "Embed",
   prime: "Prime",
 };
@@ -575,10 +577,14 @@ export async function resolveVortexTvBySource(
 }
 
 async function resolveBridgeMovie(sourceId: string, tmdbId: string): Promise<VortexStream[]> {
-  // These labels must not silently route to GoatAPI/Lightning or Vortex. Each source
-  // needs a real extractor for its own public player/API before it can be enabled here.
-  void sourceId;
-  void tmdbId;
+  if (sourceId === "vidfast") {
+    return resolveVidzeeSelected(sourceId, ["vortex-nflix", "vortex-togi"], "movie", tmdbId);
+  }
+
+  if (sourceId === "vidsrc" || sourceId === "vidsrc-to") {
+    return resolveVidzeeSelected("vidsrc-to", ["vortex-achilles", "vortex-drag"], "movie", tmdbId);
+  }
+
   return [];
 }
 
@@ -588,12 +594,14 @@ async function resolveBridgeTv(
   season: string,
   episode: string,
 ): Promise<VortexStream[]> {
-  // These labels must not silently route to GoatAPI/Lightning or Vortex. Each source
-  // needs a real extractor for its own public player/API before it can be enabled here.
-  void sourceId;
-  void tmdbId;
-  void season;
-  void episode;
+  if (sourceId === "vidfast") {
+    return resolveVidzeeSelected(sourceId, ["vortex-nflix", "vortex-togi"], "tv", tmdbId, season, episode);
+  }
+
+  if (sourceId === "vidsrc" || sourceId === "vidsrc-to") {
+    return resolveVidzeeSelected("vidsrc-to", ["vortex-achilles", "vortex-drag"], "tv", tmdbId, season, episode);
+  }
+
   return [];
 }
 

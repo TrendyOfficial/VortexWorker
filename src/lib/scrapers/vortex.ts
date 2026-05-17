@@ -286,25 +286,6 @@ async function resolveVidzee(
   return settled.filter((stream): stream is VortexStream => !!stream);
 }
 
-async function resolveVidzeeSelected(
-  sourceId: string,
-  servers: Array<(typeof VORTEX_SERVERS)[number]["id"]>,
-  kind: "movie" | "tv",
-  id: string,
-  season?: string,
-  episode?: string,
-): Promise<VortexStream[]> {
-  const apiKey = await getVidzeeKey();
-  if (!apiKey) return [];
-
-  const selected = VORTEX_SERVERS.filter((server) => servers.includes(server.id));
-  const settled = await Promise.all(
-    selected.map((server) => resolveVidzeeServer(kind, id, apiKey, server, season, episode)),
-  );
-
-  return asBridgeStreams(sourceId, settled.filter((stream): stream is VortexStream => !!stream), "vidzee");
-}
-
 async function encryptVidlinkId(id: string): Promise<string> {
   const url = new URL(`${ENCRYPT_API_BASE}/enc-vidlink`);
   url.searchParams.set("text", id);
@@ -470,7 +451,7 @@ export async function resolveVortexMovie(tmdbId: string): Promise<VortexResult> 
     timed(resolveVidzee("movie", tmdbId), 7000, []),
     timed(resolveVidlink("movie", tmdbId), 7000, []),
   ]);
-  let streams = uniqueStreams([...linkStreams, ...vidzeeStreams]);
+  let streams = uniqueStreams([...vidzeeStreams, ...linkStreams]);
   streams = await withVertexFallback(streams, () => resolveVertexMovie(tmdbId));
   if (streams.length === 0) throw new Error("Vortex could not resolve a stream for this movie");
 
@@ -483,16 +464,6 @@ export async function resolveVortexMovie(tmdbId: string): Promise<VortexResult> 
     streams,
     ms: Date.now() - start,
   };
-}
-
-function asBridgeStreams(sourceId: string, streams: VortexStream[], upstream: string): VortexStream[] {
-  const labelBase = BRIDGE_SOURCE_LABELS[sourceId] ?? sourceId;
-  return uniqueStreams(streams).map((stream, index) => ({
-    ...stream,
-    id: `${sourceId}-${stream.id ?? index}`,
-    label: `${labelBase}${stream.label ? ` - ${stream.label.replace(/^Vortex\s*/i, "")}` : ""}`,
-    upstream: `${sourceId}/${upstream}`,
-  }));
 }
 
 export async function resolveVortexMovieBySource(tmdbId: string, sourceId: string): Promise<VortexResult> {
@@ -533,8 +504,8 @@ export async function resolveVortexTv(
 
   let streams = await timed(
     firstNonEmptyStream([
-      () => resolveVidlink("tv", tmdbId, season, episode),
       () => resolveVidzee("tv", tmdbId, season, episode),
+      () => resolveVidlink("tv", tmdbId, season, episode),
     ]),
     7000,
     [],
@@ -577,14 +548,8 @@ export async function resolveVortexTvBySource(
 }
 
 async function resolveBridgeMovie(sourceId: string, tmdbId: string): Promise<VortexStream[]> {
-  if (sourceId === "vidfast") {
-    return resolveVidzeeSelected(sourceId, ["vortex-nflix", "vortex-togi"], "movie", tmdbId);
-  }
-
-  if (sourceId === "vidsrc" || sourceId === "vidsrc-to") {
-    return resolveVidzeeSelected("vidsrc-to", ["vortex-achilles", "vortex-drag"], "movie", tmdbId);
-  }
-
+  void sourceId;
+  void tmdbId;
   return [];
 }
 
@@ -594,14 +559,10 @@ async function resolveBridgeTv(
   season: string,
   episode: string,
 ): Promise<VortexStream[]> {
-  if (sourceId === "vidfast") {
-    return resolveVidzeeSelected(sourceId, ["vortex-nflix", "vortex-togi"], "tv", tmdbId, season, episode);
-  }
-
-  if (sourceId === "vidsrc" || sourceId === "vidsrc-to") {
-    return resolveVidzeeSelected("vidsrc-to", ["vortex-achilles", "vortex-drag"], "tv", tmdbId, season, episode);
-  }
-
+  void sourceId;
+  void tmdbId;
+  void season;
+  void episode;
   return [];
 }
 

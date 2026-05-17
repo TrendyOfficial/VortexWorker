@@ -462,15 +462,6 @@ async function resolveVidzee(kind, id, season, episode) {
   );
   return settled.filter((stream) => !!stream);
 }
-async function resolveVidzeeSelected(sourceId, servers, kind, id, season, episode) {
-  const apiKey = await getVidzeeKey();
-  if (!apiKey) return [];
-  const selected = VORTEX_SERVERS.filter((server2) => servers.includes(server2.id));
-  const settled = await Promise.all(
-    selected.map((server2) => resolveVidzeeServer(kind, id, apiKey, server2, season, episode))
-  );
-  return asBridgeStreams(sourceId, settled.filter((stream) => !!stream), "vidzee");
-}
 async function encryptVidlinkId(id) {
   const url = new URL(`${ENCRYPT_API_BASE}/enc-vidlink`);
   url.searchParams.set("text", id);
@@ -602,7 +593,7 @@ async function resolveVortexMovie(tmdbId) {
     timed(resolveVidzee("movie", tmdbId), 7e3, []),
     timed(resolveVidlink("movie", tmdbId), 7e3, [])
   ]);
-  let streams = uniqueStreams([...linkStreams, ...vidzeeStreams]);
+  let streams = uniqueStreams([...vidzeeStreams, ...linkStreams]);
   streams = await withVertexFallback(streams, () => resolveMovie(tmdbId));
   if (streams.length === 0) throw new Error("Vortex could not resolve a stream for this movie");
   return {
@@ -614,15 +605,6 @@ async function resolveVortexMovie(tmdbId) {
     streams,
     ms: Date.now() - start
   };
-}
-function asBridgeStreams(sourceId, streams, upstream) {
-  const labelBase = BRIDGE_SOURCE_LABELS[sourceId] ?? sourceId;
-  return uniqueStreams(streams).map((stream, index) => ({
-    ...stream,
-    id: `${sourceId}-${stream.id ?? index}`,
-    label: `${labelBase}${stream.label ? ` - ${stream.label.replace(/^Vortex\s*/i, "")}` : ""}`,
-    upstream: `${sourceId}/${upstream}`
-  }));
 }
 async function resolveVortexMovieBySource(tmdbId, sourceId) {
   const start = Date.now();
@@ -655,8 +637,8 @@ async function resolveVortexTv(tmdbId, season, episode) {
   }
   let streams = await timed(
     firstNonEmptyStream([
-      () => resolveVidlink("tv", tmdbId, season, episode),
-      () => resolveVidzee("tv", tmdbId, season, episode)
+      () => resolveVidzee("tv", tmdbId, season, episode),
+      () => resolveVidlink("tv", tmdbId, season, episode)
     ]),
     7e3,
     []
@@ -690,21 +672,15 @@ async function resolveVortexTvBySource(tmdbId, season, episode, sourceId) {
   };
 }
 async function resolveBridgeMovie(sourceId, tmdbId) {
-  if (sourceId === "vidfast") {
-    return resolveVidzeeSelected(sourceId, ["vortex-nflix", "vortex-togi"], "movie", tmdbId);
-  }
-  if (sourceId === "vidsrc" || sourceId === "vidsrc-to") {
-    return resolveVidzeeSelected("vidsrc-to", ["vortex-achilles", "vortex-drag"], "movie", tmdbId);
-  }
+  void sourceId;
+  void tmdbId;
   return [];
 }
 async function resolveBridgeTv(sourceId, tmdbId, season, episode) {
-  if (sourceId === "vidfast") {
-    return resolveVidzeeSelected(sourceId, ["vortex-nflix", "vortex-togi"], "tv", tmdbId, season, episode);
-  }
-  if (sourceId === "vidsrc" || sourceId === "vidsrc-to") {
-    return resolveVidzeeSelected("vidsrc-to", ["vortex-achilles", "vortex-drag"], "tv", tmdbId, season, episode);
-  }
+  void sourceId;
+  void tmdbId;
+  void season;
+  void episode;
   return [];
 }
 async function resolveVortexAnime(idOrSlug, episode, type) {
@@ -741,16 +717,10 @@ var index_default = {
       return json({
         ok: true,
         service: "vortex-api",
-        note: "API-only Worker. Prefer direct upstream stream URLs; /api/stream is a fallback.",
+        note: "API-only Worker for Vortex. Prefer direct upstream stream URLs; /api/stream is a fallback.",
         routes: [
           "/api/vortex/movie/{tmdbId}",
-          "/api/vortex/movie/{tmdbId}?source={vortex|vidfast|vidking|vidapi|vidsrc-cc|2embed|prime}",
-          "/api/vortex/movie/{tmdbId}/{source}",
-          "/api/vidfast/movie/{tmdbId}",
-          "/api/vidfast/tv/{tmdbId}/{season}/{episode}",
           "/api/vortex/tv/{tmdbId}/{season}/{episode}",
-          "/api/vortex/tv/{tmdbId}/{season}/{episode}?source={vortex|vidfast|vidking|vidapi|vidsrc-cc|2embed|prime}",
-          "/api/vortex/tv/{tmdbId}/{season}/{episode}/{source}",
           "/api/vortex/anime/{id}/{episode}/{sub|dub}",
           "/api/movie/{tmdbId}",
           "/api/tv/{tmdbId}/{season}/{episode}",

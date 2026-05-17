@@ -30,16 +30,10 @@ export default {
       return json({
         ok: true,
         service: "vortex-api",
-        note: "API-only Worker. Prefer direct upstream stream URLs; /api/stream is a fallback.",
+        note: "API-only Worker for Vortex. Prefer direct upstream stream URLs; /api/stream is a fallback.",
         routes: [
           "/api/vortex/movie/{tmdbId}",
-          "/api/vortex/movie/{tmdbId}?source={vortex|vidfast|vidking|vidapi|vidsrc-cc|2embed|prime}",
-          "/api/vortex/movie/{tmdbId}/{source}",
-          "/api/vidfast/movie/{tmdbId}",
-          "/api/vidfast/tv/{tmdbId}/{season}/{episode}",
           "/api/vortex/tv/{tmdbId}/{season}/{episode}",
-          "/api/vortex/tv/{tmdbId}/{season}/{episode}?source={vortex|vidfast|vidking|vidapi|vidsrc-cc|2embed|prime}",
-          "/api/vortex/tv/{tmdbId}/{season}/{episode}/{source}",
           "/api/vortex/anime/{id}/{episode}/{sub|dub}",
           "/api/movie/{tmdbId}",
           "/api/tv/{tmdbId}/{season}/{episode}",

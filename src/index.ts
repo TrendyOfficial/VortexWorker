@@ -116,13 +116,31 @@ async function handleGoatApi(request: Request, url: URL): Promise<Response> {
     targetHostname: upstream.hostname,
   });
 
-  const response = await fetch(upstream.toString(), {
+  let response = await fetch(upstream.toString(), {
     method: request.method,
     headers: {
       "User-Agent": DEFAULT_UA,
       Accept: "application/json,text/plain,*/*",
     },
   });
+
+  if (response.status === 429 && url.pathname.startsWith("/api/lightning/")) {
+    console.log("[stream-debug]", {
+      stage: "worker:goat-retry",
+      origin: request.headers.get("origin"),
+      route: url.pathname,
+      upstreamStatus: response.status,
+      retryDelayMs: 5500,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5500));
+    response = await fetch(upstream.toString(), {
+      method: request.method,
+      headers: {
+        "User-Agent": DEFAULT_UA,
+        Accept: "application/json,text/plain,*/*",
+      },
+    });
+  }
 
   console.log("[stream-debug]", {
     stage: "worker:goat-response",

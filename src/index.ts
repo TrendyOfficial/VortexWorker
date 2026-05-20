@@ -11,12 +11,17 @@ import {
 const DEFAULT_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
 const GOAT_API_BASE = "https://goatapi.imreallydagoatt.workers.dev";
+const SERVICE_NAME = "VortexWorker";
+const GIT_COMMIT = "9128b59";
+const DEPLOYED_AT = "2026-05-21T00:00:00.000Z";
+const SOURCE_BLACKLIST = new Set(["fsharetv.co", "lmscript.xyz"]);
 
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, HEAD, OPTIONS",
-  "access-control-allow-headers": "Range, Content-Type, Authorization, X-Api-Token",
-  "access-control-expose-headers": "Content-Length, Content-Range",
+  "access-control-allow-headers": "Range, Content-Type, Authorization, X-Api-Token, X-Token",
+  "access-control-expose-headers":
+    "Content-Length, Content-Range, Content-Type, X-Vortex-Proxy-Route, X-Vortex-Upstream-Host, X-Vortex-Upstream-Status, X-Vortex-Proxy-Error, X-Vortex-Rewritten-Urls",
 };
 
 export default {
@@ -27,10 +32,29 @@ export default {
 
     const url = new URL(request.url);
 
+    if (url.pathname === "/__version") {
+      return json({
+        service: SERVICE_NAME,
+        gitCommit: GIT_COMMIT,
+        deployedAt: DEPLOYED_AT,
+        environment: "production",
+        routes: [
+          "/api/stream",
+          "/m3u8-proxy",
+          "/api/lightning/movie/{tmdbId}",
+          "/api/lightning/tv/{tmdbId}/{season}/{episode}",
+          "/api/vortex/movie/{tmdbId}",
+          "/api/vortex/tv/{tmdbId}/{season}/{episode}",
+        ],
+      });
+    }
+
     if (url.pathname === "/" || url.pathname === "/health") {
       return json({
         ok: true,
-        service: "vortex-api",
+        service: SERVICE_NAME,
+        gitCommit: GIT_COMMIT,
+        deployedAt: DEPLOYED_AT,
         note: "API-only Worker for Vortex. Prefer direct upstream stream URLs; /api/stream is a fallback.",
         routes: [
           "/api/vortex/movie/{tmdbId}",
@@ -199,6 +223,17 @@ async function handleStream(request: Request): Promise<Response> {
     return new Response("bad url", { status: 400, headers: CORS_HEADERS });
   }
 
+  if (SOURCE_BLACKLIST.has(upstream.hostname)) {
+    return new Response("blocked host", {
+      status: 451,
+      headers: {
+        ...CORS_HEADERS,
+        "x-vortex-proxy-error": "worker-blacklist",
+        "x-vortex-upstream-host": upstream.hostname,
+      },
+    });
+  }
+
   const range = request.headers.get("range");
   const ref = url.searchParams.get("ref");
   const origin = url.searchParams.get("origin");
@@ -212,14 +247,19 @@ async function handleStream(request: Request): Promise<Response> {
   };
   if (range) headers.Range = range;
 
+  const safeHeaders = Object.fromEntries(
+    Object.entries(headers).filter(([key]) => ["Referer", "Origin", "Range", "Accept"].includes(key)),
+  );
+
   console.log("[stream-debug]", {
+    service: SERVICE_NAME,
+    gitCommit: GIT_COMMIT,
     stage: "worker:stream-request",
     origin: request.headers.get("origin"),
     route: url.pathname,
     targetHostname: upstream.hostname,
-    parsedHeaders: Object.fromEntries(
-      Object.entries(headers).filter(([key]) => ["Referer", "Origin", "Range"].includes(key)),
-    ),
+    parsedHeaders: safeHeaders,
+    proxyRoute: url.pathname.startsWith("/m3u8-proxy") ? "/m3u8-proxy" : "/api/stream",
   });
 
   const response = await fetch(upstream.toString(), { method: request.method, headers });
@@ -239,6 +279,8 @@ async function handleStream(request: Request): Promise<Response> {
   }
 
   console.log("[stream-debug]", {
+    service: SERVICE_NAME,
+    gitCommit: GIT_COMMIT,
     stage: "worker:stream-response",
     origin: request.headers.get("origin"),
     route: url.pathname,
@@ -261,7 +303,18 @@ async function handleStream(request: Request): Promise<Response> {
   const text = await response.text();
   responseHeaders["content-type"] = "application/vnd.apple.mpegurl";
   delete responseHeaders["content-length"];
-  return new Response(rewriteManifest(text, upstream, request.url), {
+  const rewritten = rewriteManifest(text, upstream, request.url);
+  responseHeaders["x-vortex-rewritten-urls"] = String(rewritten.rewrittenUrls);
+  console.log("[stream-debug]", {
+    service: SERVICE_NAME,
+    gitCommit: GIT_COMMIT,
+    stage: "worker:manifest-rewrite",
+    route: url.pathname,
+    targetHostname: upstream.hostname,
+    rewrittenUrls: rewritten.rewrittenUrls,
+    firstBodyChars: text.slice(0, 200),
+  });
+  return new Response(rewritten.body, {
     status: response.status,
     headers: responseHeaders,
   });
@@ -280,13 +333,14 @@ function parseHeadersParam(input: string | null): Record<string, string> {
   }
 }
 
-function rewriteManifest(manifest: string, upstream: URL, requestUrl: string): string {
+function rewriteManifest(manifest: string, upstream: URL, requestUrl: string): { body: string; rewrittenUrls: number } {
   const proxyBase = new URL(requestUrl);
   const ref = proxyBase.searchParams.get("ref");
   const origin = proxyBase.searchParams.get("origin");
   const originalHeaders = proxyBase.searchParams.get("headers");
   const token = proxyBase.searchParams.get("token");
   proxyBase.search = "";
+  let rewrittenUrls = 0;
 
   const wrap = (absoluteUrl: string) => {
     const params = new URLSearchParams({ url: absoluteUrl });
@@ -294,10 +348,11 @@ function rewriteManifest(manifest: string, upstream: URL, requestUrl: string): s
     if (origin) params.set("origin", origin);
     if (originalHeaders) params.set("headers", originalHeaders);
     if (token) params.set("token", token);
-    return `${proxyBase.pathname}?${params.toString()}`;
+    rewrittenUrls += 1;
+    return `${proxyBase.origin}${proxyBase.pathname}?${params.toString()}`;
   };
 
-  return manifest
+  const body = manifest
     .split("\n")
     .map((line) => {
       const trimmed = line.trim();
@@ -312,6 +367,8 @@ function rewriteManifest(manifest: string, upstream: URL, requestUrl: string): s
       return wrap(new URL(trimmed, upstream).toString());
     })
     .join("\n");
+
+  return { body, rewrittenUrls };
 }
 
 function json(body: unknown, status = 200, extra: Record<string, string> = {}): Response {

@@ -10,11 +10,12 @@ import {
 
 const DEFAULT_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
+const GOAT_API_BASE = "https://goatapi.imreallydagoatt.workers.dev";
 
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, HEAD, OPTIONS",
-  "access-control-allow-headers": "Range, Content-Type",
+  "access-control-allow-headers": "Range, Content-Type, Authorization, X-Api-Token",
   "access-control-expose-headers": "Content-Length, Content-Range",
 };
 
@@ -46,6 +47,10 @@ export default {
       return handleVortex(url);
     }
 
+    if (url.pathname.startsWith("/api/lightning/") || url.pathname.startsWith("/api/subtitles/")) {
+      return handleGoatApi(request, url);
+    }
+
     const sourceAlias = matchSourceAlias(url.pathname);
     if (sourceAlias) {
       const next = new URL(url.toString());
@@ -74,6 +79,46 @@ function rewriteAlias(url: URL, from: string, to: string): URL {
   const next = new URL(url.toString());
   next.pathname = next.pathname.replace(from, to);
   return next;
+}
+
+async function handleGoatApi(request: Request, url: URL): Promise<Response> {
+  const upstream = new URL(url.pathname + url.search, GOAT_API_BASE);
+  upstream.searchParams.delete("token");
+
+  console.log("[stream-debug]", {
+    stage: "worker:goat-request",
+    origin: request.headers.get("origin"),
+    route: url.pathname,
+    targetHostname: upstream.hostname,
+  });
+
+  const response = await fetch(upstream.toString(), {
+    method: request.method,
+    headers: {
+      "User-Agent": DEFAULT_UA,
+      Accept: "application/json,text/plain,*/*",
+    },
+  });
+
+  console.log("[stream-debug]", {
+    stage: "worker:goat-response",
+    origin: request.headers.get("origin"),
+    route: url.pathname,
+    upstreamStatus: response.status,
+  });
+
+  const headers: Record<string, string> = {
+    ...CORS_HEADERS,
+    "x-vortex-upstream-host": upstream.hostname,
+    "x-vortex-upstream-status": String(response.status),
+  };
+  const contentType = response.headers.get("content-type");
+  if (contentType) headers["content-type"] = contentType;
+
+  return new Response(response.body, {
+    status: response.status,
+    headers,
+  });
 }
 
 function matchSourceAlias(pathname: string): { source: string; rewrittenPath: string } | null {
@@ -167,15 +212,46 @@ async function handleStream(request: Request): Promise<Response> {
   };
   if (range) headers.Range = range;
 
+  console.log("[stream-debug]", {
+    stage: "worker:stream-request",
+    origin: request.headers.get("origin"),
+    route: url.pathname,
+    targetHostname: upstream.hostname,
+    parsedHeaders: Object.fromEntries(
+      Object.entries(headers).filter(([key]) => ["Referer", "Origin", "Range"].includes(key)),
+    ),
+  });
+
   const response = await fetch(upstream.toString(), { method: request.method, headers });
   const contentType = response.headers.get("content-type") ?? "";
   const isManifest =
     /mpegurl|m3u8/i.test(contentType) || /\.m3u8(\?|$)/i.test(upstream.pathname + upstream.search);
 
-  const responseHeaders: Record<string, string> = { ...CORS_HEADERS };
+  const responseHeaders: Record<string, string> = {
+    ...CORS_HEADERS,
+    "x-vortex-proxy-route": url.pathname,
+    "x-vortex-upstream-host": upstream.hostname,
+    "x-vortex-upstream-status": String(response.status),
+  };
   for (const header of ["content-type", "content-length", "content-range", "accept-ranges", "cache-control"]) {
     const value = response.headers.get(header);
     if (value) responseHeaders[header] = value;
+  }
+
+  console.log("[stream-debug]", {
+    stage: "worker:stream-response",
+    origin: request.headers.get("origin"),
+    route: url.pathname,
+    targetHostname: upstream.hostname,
+    upstreamStatus: response.status,
+    contentType,
+    isManifest,
+    errorSource: response.ok ? undefined : "upstream",
+  });
+
+  if (!response.ok) {
+    responseHeaders["x-vortex-proxy-error"] = "upstream";
+    return new Response(response.body, { status: response.status, headers: responseHeaders });
   }
 
   if (!isManifest) {
@@ -208,14 +284,16 @@ function rewriteManifest(manifest: string, upstream: URL, requestUrl: string): s
   const proxyBase = new URL(requestUrl);
   const ref = proxyBase.searchParams.get("ref");
   const origin = proxyBase.searchParams.get("origin");
+  const originalHeaders = proxyBase.searchParams.get("headers");
+  const token = proxyBase.searchParams.get("token");
   proxyBase.search = "";
 
   const wrap = (absoluteUrl: string) => {
     const params = new URLSearchParams({ url: absoluteUrl });
     if (ref) params.set("ref", ref);
     if (origin) params.set("origin", origin);
-    const headers = proxyBase.searchParams.get("headers");
-    if (headers) params.set("headers", headers);
+    if (originalHeaders) params.set("headers", originalHeaders);
+    if (token) params.set("token", token);
     return `${proxyBase.pathname}?${params.toString()}`;
   };
 

@@ -502,14 +502,11 @@ export async function resolveVortexTv(
     };
   }
 
-  let streams = await timed(
-    firstNonEmptyStream([
-      () => resolveVidzee("tv", tmdbId, season, episode),
-      () => resolveVidlink("tv", tmdbId, season, episode),
-    ]),
-    7000,
-    [],
-  );
+  const [vidzeeStreams, linkStreams] = await Promise.all([
+    timed(resolveVidzee("tv", tmdbId, season, episode), 7000, []),
+    timed(resolveVidlink("tv", tmdbId, season, episode), 7000, []),
+  ]);
+  let streams = uniqueStreams([...vidzeeStreams, ...linkStreams]);
   if (streams.length === 0)
     streams = await withVertexFallback(streams, () => resolveVertexTv(tmdbId, season, episode));
   if (streams.length === 0) throw new Error(`Vortex could not resolve S${season}E${episode}`);

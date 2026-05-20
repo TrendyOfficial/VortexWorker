@@ -684,7 +684,7 @@ async function resolveVortexAnime(idOrSlug, episode, type) {
 var DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
 var GOAT_API_BASE = "https://goatapi.imreallydagoatt.workers.dev";
 var SERVICE_NAME = "VortexWorker";
-var GIT_COMMIT = "9128b59";
+var GIT_COMMIT = "034a2c5";
 var DEPLOYED_AT = "2026-05-21T00:00:00.000Z";
 var SOURCE_BLACKLIST = /* @__PURE__ */ new Set(["fsharetv.co", "lmscript.xyz"]);
 var CORS_HEADERS = {

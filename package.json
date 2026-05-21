@@ -10,7 +10,8 @@
     "deploy": "wrangler deploy",
     "dry-run": "wrangler deploy --dry-run --outdir dist-worker",
     "start": "node dist/server.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "regression:vortex": "node scripts/vortex-regression.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260421.1",

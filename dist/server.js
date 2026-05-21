@@ -687,16 +687,38 @@ var SERVICE_NAME = "VortexWorker";
 var GIT_COMMIT = "034a2c5";
 var DEPLOYED_AT = "2026-05-21T00:00:00.000Z";
 var SOURCE_BLACKLIST = /* @__PURE__ */ new Set(["fsharetv.co", "lmscript.xyz"]);
-var CORS_HEADERS = {
-  "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, HEAD, OPTIONS",
-  "access-control-allow-headers": "Range, Content-Type, Authorization, X-Api-Token, X-Token",
-  "access-control-expose-headers": "Content-Length, Content-Range, Content-Type, X-Vortex-Proxy-Route, X-Vortex-Upstream-Host, X-Vortex-Upstream-Status, X-Vortex-Proxy-Error, X-Vortex-Rewritten-Urls"
-};
+var ALLOWED_ORIGINS = /* @__PURE__ */ new Set([
+  "https://basementx.xyz",
+  "https://www.basementx.xyz",
+  "https://basement-90p.pages.dev",
+  "http://localhost:5173",
+  "http://localhost:5174",
+  "http://127.0.0.1:5173",
+  "http://127.0.0.1:5174"
+]);
+function corsHeaders(request) {
+  const origin = request?.headers.get("origin");
+  const allowedOrigin = origin && ALLOWED_ORIGINS.has(origin) ? origin : "https://basementx.xyz";
+  return {
+    "access-control-allow-origin": allowedOrigin,
+    vary: "Origin",
+    "access-control-allow-methods": "GET, HEAD, OPTIONS",
+    "access-control-allow-headers": "Range, Content-Type, Authorization, X-Api-Token, X-Token",
+    "access-control-expose-headers": "Content-Length, Content-Range, Content-Type, X-Proxy-Service, X-Proxy-Route, X-Upstream-Host, X-Upstream-Status, X-Upstream-Content-Type, X-Proxy-Error, X-Rewritten-Urls, X-Vortex-Proxy-Route, X-Vortex-Upstream-Host, X-Vortex-Upstream-Status, X-Vortex-Proxy-Error, X-Vortex-Rewritten-Urls"
+  };
+}
+function streamLog(payload) {
+  console.log("[stream-debug]", {
+    proxyService: SERVICE_NAME,
+    proxyPurpose: "hls-cors-header-proxy",
+    gitCommit: GIT_COMMIT,
+    ...payload
+  });
+}
 var index_default = {
   async fetch(request) {
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: CORS_HEADERS });
+      return new Response(null, { status: 204, headers: corsHeaders(request) });
     }
     const url = new URL(request.url);
     if (url.pathname === "/__version") {
@@ -765,7 +787,7 @@ function rewriteAlias(url, from, to) {
 async function handleGoatApi(request, url) {
   const upstream = new URL(url.pathname + url.search, GOAT_API_BASE);
   upstream.searchParams.delete("token");
-  console.log("[stream-debug]", {
+  streamLog({
     stage: "worker:goat-request",
     origin: request.headers.get("origin"),
     route: url.pathname,
@@ -779,7 +801,7 @@ async function handleGoatApi(request, url) {
     }
   });
   if (response.status === 429 && url.pathname.startsWith("/api/lightning/")) {
-    console.log("[stream-debug]", {
+    streamLog({
       stage: "worker:goat-retry",
       origin: request.headers.get("origin"),
       route: url.pathname,
@@ -795,18 +817,22 @@ async function handleGoatApi(request, url) {
       }
     });
   }
-  console.log("[stream-debug]", {
+  streamLog({
     stage: "worker:goat-response",
     origin: request.headers.get("origin"),
     route: url.pathname,
     upstreamStatus: response.status
   });
+  const contentType = response.headers.get("content-type");
   const headers = {
-    ...CORS_HEADERS,
+    ...corsHeaders(request),
+    "x-proxy-service": SERVICE_NAME,
+    "x-upstream-host": upstream.hostname,
+    "x-upstream-status": String(response.status),
+    "x-upstream-content-type": contentType ?? "",
     "x-vortex-upstream-host": upstream.hostname,
     "x-vortex-upstream-status": String(response.status)
   };
-  const contentType = response.headers.get("content-type");
   if (contentType) headers["content-type"] = contentType;
   return new Response(response.body, {
     status: response.status,
@@ -868,18 +894,21 @@ function sanitizeSource(source) {
 async function handleStream(request) {
   const url = new URL(request.url);
   const target = url.searchParams.get("url");
-  if (!target) return new Response("missing url", { status: 400, headers: CORS_HEADERS });
+  if (!target) return new Response("missing url", { status: 400, headers: corsHeaders(request) });
   let upstream;
   try {
     upstream = new URL(target);
   } catch {
-    return new Response("bad url", { status: 400, headers: CORS_HEADERS });
+    return new Response("bad url", { status: 400, headers: corsHeaders(request) });
   }
   if (SOURCE_BLACKLIST.has(upstream.hostname)) {
     return new Response("blocked host", {
       status: 451,
       headers: {
-        ...CORS_HEADERS,
+        ...corsHeaders(request),
+        "x-proxy-service": SERVICE_NAME,
+        "x-proxy-error": "worker-blacklist",
+        "x-upstream-host": upstream.hostname,
         "x-vortex-proxy-error": "worker-blacklist",
         "x-vortex-upstream-host": upstream.hostname
       }
@@ -900,9 +929,7 @@ async function handleStream(request) {
   const safeHeaders = Object.fromEntries(
     Object.entries(headers).filter(([key]) => ["Referer", "Origin", "Range", "Accept"].includes(key))
   );
-  console.log("[stream-debug]", {
-    service: SERVICE_NAME,
-    gitCommit: GIT_COMMIT,
+  streamLog({
     stage: "worker:stream-request",
     origin: request.headers.get("origin"),
     route: url.pathname,
@@ -914,7 +941,12 @@ async function handleStream(request) {
   const contentType = response.headers.get("content-type") ?? "";
   const isManifest = /mpegurl|m3u8/i.test(contentType) || /\.m3u8(\?|$)/i.test(upstream.pathname + upstream.search);
   const responseHeaders = {
-    ...CORS_HEADERS,
+    ...corsHeaders(request),
+    "x-proxy-service": SERVICE_NAME,
+    "x-proxy-route": url.pathname,
+    "x-upstream-host": upstream.hostname,
+    "x-upstream-status": String(response.status),
+    "x-upstream-content-type": contentType,
     "x-vortex-proxy-route": url.pathname,
     "x-vortex-upstream-host": upstream.hostname,
     "x-vortex-upstream-status": String(response.status)
@@ -923,9 +955,7 @@ async function handleStream(request) {
     const value = response.headers.get(header);
     if (value) responseHeaders[header] = value;
   }
-  console.log("[stream-debug]", {
-    service: SERVICE_NAME,
-    gitCommit: GIT_COMMIT,
+  streamLog({
     stage: "worker:stream-response",
     origin: request.headers.get("origin"),
     route: url.pathname,
@@ -936,6 +966,7 @@ async function handleStream(request) {
     errorSource: response.ok ? void 0 : "upstream"
   });
   if (!response.ok) {
+    responseHeaders["x-proxy-error"] = "upstream";
     responseHeaders["x-vortex-proxy-error"] = "upstream";
     return new Response(response.body, { status: response.status, headers: responseHeaders });
   }
@@ -946,10 +977,9 @@ async function handleStream(request) {
   responseHeaders["content-type"] = "application/vnd.apple.mpegurl";
   delete responseHeaders["content-length"];
   const rewritten = rewriteManifest(text, upstream, request.url);
+  responseHeaders["x-rewritten-urls"] = String(rewritten.rewrittenUrls);
   responseHeaders["x-vortex-rewritten-urls"] = String(rewritten.rewrittenUrls);
-  console.log("[stream-debug]", {
-    service: SERVICE_NAME,
-    gitCommit: GIT_COMMIT,
+  streamLog({
     stage: "worker:manifest-rewrite",
     route: url.pathname,
     targetHostname: upstream.hostname,
@@ -1006,7 +1036,7 @@ function json(body, status = 200, extra = {}) {
     status,
     headers: {
       "content-type": "application/json",
-      ...CORS_HEADERS,
+      ...corsHeaders(),
       ...extra
     }
   });

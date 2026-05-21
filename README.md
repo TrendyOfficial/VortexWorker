@@ -36,4 +36,6 @@ node dist/server.js
 
 ## DNS
 
-Point `api.basementx.me` to the server, then reverse proxy to port `8787`.
+For VPS/Node deployments, point a real configured domain you control, such as
+`api.basementx.xyz`, to the server, then reverse proxy to port `8787`.
+Do not use an unconfigured placeholder domain in frontend runtime config.

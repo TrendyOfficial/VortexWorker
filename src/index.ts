@@ -24,6 +24,11 @@ const ALLOWED_ORIGINS = new Set([
   "http://127.0.0.1:5173",
   "http://127.0.0.1:5174",
 ]);
+const BASEMENT_HOME = "https://basementx.xyz/";
+
+type Env = {
+  VORTEX_API_TOKEN?: string;
+};
 
 function corsHeaders(request?: Request): Record<string, string> {
   const origin = request?.headers.get("origin");
@@ -48,12 +53,15 @@ function streamLog(payload: Record<string, unknown>): void {
 }
 
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: Env = {}): Promise<Response> {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(request) });
     }
 
     const url = new URL(request.url);
+
+    const accessResponse = guardAccess(request, url, env);
+    if (accessResponse) return accessResponse;
 
     if (url.pathname === "/__version") {
       return json({
@@ -69,7 +77,7 @@ export default {
           "/api/vortex/movie/{tmdbId}",
           "/api/vortex/tv/{tmdbId}/{season}/{episode}",
         ],
-      });
+      }, 200, {}, request);
     }
 
     if (url.pathname === "/" || url.pathname === "/health") {
@@ -87,11 +95,11 @@ export default {
           "/api/tv/{tmdbId}/{season}/{episode}",
           "/api/stream?url={encodedUrl}",
         ],
-      });
+      }, 200, {}, request);
     }
 
     if (url.pathname.startsWith("/api/vortex/")) {
-      return handleVortex(url);
+      return handleVortex(request, url);
     }
 
     if (url.pathname.startsWith("/api/lightning/") || url.pathname.startsWith("/api/subtitles/")) {
@@ -103,24 +111,54 @@ export default {
       const next = new URL(url.toString());
       next.pathname = sourceAlias.rewrittenPath;
       next.searchParams.set("source", sourceAlias.source);
-      return handleVortex(next);
+      return handleVortex(request, next);
     }
 
     if (url.pathname.startsWith("/api/movie/")) {
-      return handleVortex(rewriteAlias(url, "/api/movie/", "/api/vortex/movie/"));
+      return handleVortex(request, rewriteAlias(url, "/api/movie/", "/api/vortex/movie/"));
     }
 
     if (url.pathname.startsWith("/api/tv/")) {
-      return handleVortex(rewriteAlias(url, "/api/tv/", "/api/vortex/tv/"));
+      return handleVortex(request, rewriteAlias(url, "/api/tv/", "/api/vortex/tv/"));
     }
 
     if (url.pathname.startsWith("/api/stream") || url.pathname.startsWith("/m3u8-proxy")) {
       return handleStream(request);
     }
 
-    return json({ ok: false, error: "Not found" }, 404);
+    return json({ ok: false, error: "Not found" }, 404, {}, request);
   },
 };
+
+function guardAccess(request: Request, url: URL, env: Env): Response | null {
+  const origin = request.headers.get("origin");
+  const referer = request.headers.get("referer");
+  const acceptsHtml = request.headers.get("accept")?.includes("text/html") ?? false;
+  const isNavigation = request.headers.get("sec-fetch-mode") === "navigate" || acceptsHtml;
+  const isLocalHost = ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  const token = request.headers.get("x-token") ?? request.headers.get("x-api-token") ?? url.searchParams.get("token");
+
+  if (env.VORTEX_API_TOKEN && token === env.VORTEX_API_TOKEN) return null;
+
+  if (origin) {
+    if (ALLOWED_ORIGINS.has(origin)) return null;
+    return json({ ok: false, error: "Origin not allowed" }, 403, {}, request);
+  }
+
+  if (referer) {
+    try {
+      if (ALLOWED_ORIGINS.has(new URL(referer).origin)) return null;
+    } catch {
+      // Fall through to the direct-browser handling below.
+    }
+  }
+
+  if (isNavigation && !isLocalHost) {
+    return Response.redirect(BASEMENT_HOME, 302);
+  }
+
+  return null;
+}
 
 function rewriteAlias(url: URL, from: string, to: string): URL {
   const next = new URL(url.toString());
@@ -206,9 +244,10 @@ function matchSourceAlias(pathname: string): { source: string; rewrittenPath: st
   return null;
 }
 
-async function handleVortex(url: URL): Promise<Response> {
+async function handleVortex(request: Request, url: URL): Promise<Response> {
   const segs = url.pathname.replace(/^\/api\/vortex\/?/, "").split("/").filter(Boolean);
   const ttl = Math.min(Math.max(Number(url.searchParams.get("ttl")) || 600, 30), 3600);
+  const lang = normalizeLanguageParam(url.searchParams.get("lang"));
   const pathSource =
     segs[0] === "movie" ? segs[2] : segs[0] === "tv" ? segs[4] : undefined;
   const source = sanitizeSource(pathSource ?? url.searchParams.get("source"));
@@ -241,13 +280,37 @@ async function handleVortex(url: URL): Promise<Response> {
       },
     );
 
-    return json(data, 200, {
+    return json(filterResultLanguage(data, lang), 200, {
       "x-cache": cached ? "HIT" : "MISS",
       "cache-control": `private, max-age=${ttl}`,
-    });
+    }, request);
   } catch (error) {
-    return json({ ok: false, source, error: String((error as Error).message ?? error) }, 502);
+    return json({ ok: false, source, error: String((error as Error).message ?? error) }, 502, {}, request);
   }
+}
+
+function normalizeLanguageParam(input: string | null): string | null {
+  const clean = input?.trim();
+  if (!clean || clean.toLowerCase() === "default") return "english";
+  if (clean.toLowerCase() === "all") return null;
+  return clean.toLowerCase();
+}
+
+function filterResultLanguage(data: VortexResult, lang: string | null): VortexResult {
+  if (!lang) return data;
+
+  const filterCaptions = (captions: VortexResult["primary"]["captions"] = []) =>
+    captions.filter((caption) => caption.language?.toLowerCase().includes(lang));
+  const streams = data.streams.map((stream) => ({
+    ...stream,
+    captions: filterCaptions(stream.captions),
+  }));
+
+  return {
+    ...data,
+    primary: streams[0] ?? { ...data.primary, captions: filterCaptions(data.primary.captions) },
+    streams,
+  };
 }
 
 function sanitizeSource(source: string | null): string {
@@ -420,12 +483,12 @@ function rewriteManifest(manifest: string, upstream: URL, requestUrl: string): {
   return { body, rewrittenUrls };
 }
 
-function json(body: unknown, status = 200, extra: Record<string, string> = {}): Response {
-  return new Response(JSON.stringify(body), {
+function json(body: unknown, status = 200, extra: Record<string, string> = {}, request?: Request): Response {
+  return new Response(JSON.stringify(body, null, 2), {
     status,
     headers: {
       "content-type": "application/json",
-      ...corsHeaders(),
+      ...corsHeaders(request),
       ...extra,
     },
   });

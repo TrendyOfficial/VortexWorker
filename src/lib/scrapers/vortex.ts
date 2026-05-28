@@ -198,6 +198,29 @@ function normalizeVidlinkCaptions(captions?: VidlinkCaption[]): VortexCaption[] 
   }, []);
 }
 
+function parseEmbeddedHeaders(url: string): Record<string, string> {
+  try {
+    const headersParam = new URL(url).searchParams.get("headers");
+    if (!headersParam) return {};
+    const parsed = JSON.parse(headersParam) as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+        .map(([key, value]) => [
+          key.toLowerCase() === "referer" ? "Referer" : key.toLowerCase() === "origin" ? "Origin" : key,
+          value,
+        ]),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function headersFromQualities(qualities: Record<string, { type: string; url: string }>) {
+  const firstUrl = Object.values(qualities)[0]?.url;
+  return firstUrl ? parseEmbeddedHeaders(firstUrl) : {};
+}
+
 async function getVidzeeKey(): Promise<string> {
   const res = await fetchWithTimeout(VIDZEE_KEY_URL, {
     timeout: 5000,
@@ -346,7 +369,7 @@ async function resolveVidlink(
           type: "file",
           qualities: stream.qualities,
           captions: normalizeVidlinkCaptions(stream.captions),
-          headers: { ...VIDLINK_HEADERS, ...(stream.headers ?? {}) },
+          headers: { ...VIDLINK_HEADERS, ...headersFromQualities(stream.qualities), ...(stream.headers ?? {}) },
           upstream: "vortex/link",
         },
       ];
@@ -414,6 +437,45 @@ function fromDbStream(stream: VortexDbStream): VortexStream {
   };
 }
 
+function streamUrls(stream: VortexStream): string[] {
+  if (stream.playlist) return [stream.playlist];
+  return Object.values(stream.qualities ?? {}).map((quality) => quality.url);
+}
+
+function streamHeaders(stream: VortexStream, url: string): Record<string, string> {
+  return {
+    ...(stream.headers ?? {}),
+    ...parseEmbeddedHeaders(url),
+  };
+}
+
+async function isPlayableStream(stream: VortexStream): Promise<boolean> {
+  const urls = streamUrls(stream);
+  if (urls.length === 0) return false;
+
+  const bestUrl = [...urls].reverse()[0];
+  try {
+    const isHls = stream.type === "hls" || /\.m3u8(\?|$)/i.test(bestUrl);
+    const response = await fetchWithTimeout(bestUrl, {
+      timeout: 3500,
+      headers: {
+        ...streamHeaders(stream, bestUrl),
+        Accept: isHls ? "application/vnd.apple.mpegurl,*/*" : "*/*",
+        ...(!isHls ? { Range: "bytes=0-1" } : {}),
+      },
+    });
+    await response.body?.cancel();
+    return response.ok || response.status === 206;
+  } catch {
+    return false;
+  }
+}
+
+async function playableStreams(streams: VortexStream[]): Promise<VortexStream[]> {
+  const checked = await Promise.all(streams.map(async (stream) => ((await isPlayableStream(stream)) ? stream : null)));
+  return checked.filter((stream): stream is VortexStream => !!stream);
+}
+
 async function withVertexFallback(
   streams: VortexStream[],
   fallback: () => Promise<{ streams?: VortexStream[]; primary?: VortexStream }>,
@@ -435,24 +497,27 @@ export async function resolveVortexMovie(tmdbId: string): Promise<VortexResult> 
   const start = Date.now();
   const db = await resolveVortexDbEntry("movie", tmdbId);
   if (db.ok) {
-    const streams = db.streams.map(fromDbStream);
-    return {
-      ok: true,
-      source: "vortex",
-      kind: "movie",
-      params: { id: tmdbId },
-      primary: streams[0],
-      streams,
-      ms: Date.now() - start,
-    };
+    const streams = await playableStreams(db.streams.map(fromDbStream));
+    if (streams.length > 0) {
+      return {
+        ok: true,
+        source: "vortex",
+        kind: "movie",
+        params: { id: tmdbId },
+        primary: streams[0],
+        streams,
+        ms: Date.now() - start,
+      };
+    }
   }
 
   const [vidzeeStreams, linkStreams] = await Promise.all([
     timed(resolveVidzee("movie", tmdbId), 7000, []),
     timed(resolveVidlink("movie", tmdbId), 7000, []),
   ]);
-  let streams = uniqueStreams([...vidzeeStreams, ...linkStreams]);
+  let streams = await playableStreams(uniqueStreams([...vidzeeStreams, ...linkStreams]));
   streams = await withVertexFallback(streams, () => resolveVertexMovie(tmdbId));
+  streams = await playableStreams(streams);
   if (streams.length === 0) throw new Error("Vortex could not resolve a stream for this movie");
 
   return {
@@ -490,25 +555,28 @@ export async function resolveVortexTv(
   const start = Date.now();
   const db = await resolveVortexDbEntry("tv", tmdbId, season, episode);
   if (db.ok) {
-    const streams = db.streams.map(fromDbStream);
-    return {
-      ok: true,
-      source: "vortex",
-      kind: "tv",
-      params: { id: tmdbId, season, episode },
-      primary: streams[0],
-      streams,
-      ms: Date.now() - start,
-    };
+    const streams = await playableStreams(db.streams.map(fromDbStream));
+    if (streams.length > 0) {
+      return {
+        ok: true,
+        source: "vortex",
+        kind: "tv",
+        params: { id: tmdbId, season, episode },
+        primary: streams[0],
+        streams,
+        ms: Date.now() - start,
+      };
+    }
   }
 
   const [vidzeeStreams, linkStreams] = await Promise.all([
     timed(resolveVidzee("tv", tmdbId, season, episode), 7000, []),
     timed(resolveVidlink("tv", tmdbId, season, episode), 7000, []),
   ]);
-  let streams = uniqueStreams([...vidzeeStreams, ...linkStreams]);
+  let streams = await playableStreams(uniqueStreams([...vidzeeStreams, ...linkStreams]));
   if (streams.length === 0)
     streams = await withVertexFallback(streams, () => resolveVertexTv(tmdbId, season, episode));
+  streams = await playableStreams(streams);
   if (streams.length === 0) throw new Error(`Vortex could not resolve S${season}E${episode}`);
 
   return {

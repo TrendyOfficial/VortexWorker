@@ -401,6 +401,25 @@ function normalizeVidlinkCaptions(captions) {
     return acc;
   }, []);
 }
+function parseEmbeddedHeaders(url) {
+  try {
+    const headersParam = new URL(url).searchParams.get("headers");
+    if (!headersParam) return {};
+    const parsed = JSON.parse(headersParam);
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry) => typeof entry[1] === "string").map(([key, value]) => [
+        key.toLowerCase() === "referer" ? "Referer" : key.toLowerCase() === "origin" ? "Origin" : key,
+        value
+      ])
+    );
+  } catch {
+    return {};
+  }
+}
+function headersFromQualities(qualities) {
+  const firstUrl = Object.values(qualities)[0]?.url;
+  return firstUrl ? parseEmbeddedHeaders(firstUrl) : {};
+}
 async function getVidzeeKey() {
   const res = await fetchWithTimeout2(VIDZEE_KEY_URL, {
     timeout: 5e3,
@@ -507,7 +526,7 @@ async function resolveVidlink(kind, id, season, episode) {
           type: "file",
           qualities: stream.qualities,
           captions: normalizeVidlinkCaptions(stream.captions),
-          headers: { ...VIDLINK_HEADERS, ...stream.headers ?? {} },
+          headers: { ...VIDLINK_HEADERS, ...headersFromQualities(stream.qualities), ...stream.headers ?? {} },
           upstream: "vortex/link"
         }
       ];
@@ -546,6 +565,40 @@ function fromDbStream(stream) {
     upstream: "vortex/db"
   };
 }
+function streamUrls(stream) {
+  if (stream.playlist) return [stream.playlist];
+  return Object.values(stream.qualities ?? {}).map((quality) => quality.url);
+}
+function streamHeaders(stream, url) {
+  return {
+    ...stream.headers ?? {},
+    ...parseEmbeddedHeaders(url)
+  };
+}
+async function isPlayableStream(stream) {
+  const urls = streamUrls(stream);
+  if (urls.length === 0) return false;
+  const bestUrl = [...urls].reverse()[0];
+  try {
+    const isHls = stream.type === "hls" || /\.m3u8(\?|$)/i.test(bestUrl);
+    const response = await fetchWithTimeout2(bestUrl, {
+      timeout: 3500,
+      headers: {
+        ...streamHeaders(stream, bestUrl),
+        Accept: isHls ? "application/vnd.apple.mpegurl,*/*" : "*/*",
+        ...!isHls ? { Range: "bytes=0-1" } : {}
+      }
+    });
+    await response.body?.cancel();
+    return response.ok || response.status === 206;
+  } catch {
+    return false;
+  }
+}
+async function playableStreams(streams) {
+  const checked = await Promise.all(streams.map(async (stream) => await isPlayableStream(stream) ? stream : null));
+  return checked.filter((stream) => !!stream);
+}
 async function withVertexFallback(streams, fallback) {
   if (streams.length >= 2) return streams;
   try {
@@ -562,23 +615,26 @@ async function resolveVortexMovie(tmdbId) {
   const start = Date.now();
   const db = await resolveEntry("movie", tmdbId);
   if (db.ok) {
-    const streams2 = db.streams.map(fromDbStream);
-    return {
-      ok: true,
-      source: "vortex",
-      kind: "movie",
-      params: { id: tmdbId },
-      primary: streams2[0],
-      streams: streams2,
-      ms: Date.now() - start
-    };
+    const streams2 = await playableStreams(db.streams.map(fromDbStream));
+    if (streams2.length > 0) {
+      return {
+        ok: true,
+        source: "vortex",
+        kind: "movie",
+        params: { id: tmdbId },
+        primary: streams2[0],
+        streams: streams2,
+        ms: Date.now() - start
+      };
+    }
   }
   const [vidzeeStreams, linkStreams] = await Promise.all([
     timed(resolveVidzee("movie", tmdbId), 7e3, []),
     timed(resolveVidlink("movie", tmdbId), 7e3, [])
   ]);
-  let streams = uniqueStreams([...vidzeeStreams, ...linkStreams]);
+  let streams = await playableStreams(uniqueStreams([...vidzeeStreams, ...linkStreams]));
   streams = await withVertexFallback(streams, () => resolveMovie(tmdbId));
+  streams = await playableStreams(streams);
   if (streams.length === 0) throw new Error("Vortex could not resolve a stream for this movie");
   return {
     ok: true,
@@ -608,24 +664,27 @@ async function resolveVortexTv(tmdbId, season, episode) {
   const start = Date.now();
   const db = await resolveEntry("tv", tmdbId, season, episode);
   if (db.ok) {
-    const streams2 = db.streams.map(fromDbStream);
-    return {
-      ok: true,
-      source: "vortex",
-      kind: "tv",
-      params: { id: tmdbId, season, episode },
-      primary: streams2[0],
-      streams: streams2,
-      ms: Date.now() - start
-    };
+    const streams2 = await playableStreams(db.streams.map(fromDbStream));
+    if (streams2.length > 0) {
+      return {
+        ok: true,
+        source: "vortex",
+        kind: "tv",
+        params: { id: tmdbId, season, episode },
+        primary: streams2[0],
+        streams: streams2,
+        ms: Date.now() - start
+      };
+    }
   }
   const [vidzeeStreams, linkStreams] = await Promise.all([
     timed(resolveVidzee("tv", tmdbId, season, episode), 7e3, []),
     timed(resolveVidlink("tv", tmdbId, season, episode), 7e3, [])
   ]);
-  let streams = uniqueStreams([...vidzeeStreams, ...linkStreams]);
+  let streams = await playableStreams(uniqueStreams([...vidzeeStreams, ...linkStreams]));
   if (streams.length === 0)
     streams = await withVertexFallback(streams, () => resolveTv(tmdbId, season, episode));
+  streams = await playableStreams(streams);
   if (streams.length === 0) throw new Error(`Vortex could not resolve S${season}E${episode}`);
   return {
     ok: true,
@@ -696,6 +755,7 @@ var ALLOWED_ORIGINS = /* @__PURE__ */ new Set([
   "http://127.0.0.1:5173",
   "http://127.0.0.1:5174"
 ]);
+var BASEMENT_HOME = "https://basementx.xyz/";
 function corsHeaders(request) {
   const origin = request?.headers.get("origin");
   const allowedOrigin = origin && ALLOWED_ORIGINS.has(origin) ? origin : "https://basementx.xyz";
@@ -716,11 +776,13 @@ function streamLog(payload) {
   });
 }
 var index_default = {
-  async fetch(request) {
+  async fetch(request, env = {}) {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(request) });
     }
     const url = new URL(request.url);
+    const accessResponse = guardAccess(request, url, env);
+    if (accessResponse) return accessResponse;
     if (url.pathname === "/__version") {
       return json({
         service: SERVICE_NAME,
@@ -735,7 +797,7 @@ var index_default = {
           "/api/vortex/movie/{tmdbId}",
           "/api/vortex/tv/{tmdbId}/{season}/{episode}"
         ]
-      });
+      }, 200, {}, request);
     }
     if (url.pathname === "/" || url.pathname === "/health") {
       return json({
@@ -752,10 +814,10 @@ var index_default = {
           "/api/tv/{tmdbId}/{season}/{episode}",
           "/api/stream?url={encodedUrl}"
         ]
-      });
+      }, 200, {}, request);
     }
     if (url.pathname.startsWith("/api/vortex/")) {
-      return handleVortex(url);
+      return handleVortex(request, url);
     }
     if (url.pathname.startsWith("/api/lightning/") || url.pathname.startsWith("/api/subtitles/")) {
       return handleGoatApi(request, url);
@@ -765,20 +827,43 @@ var index_default = {
       const next = new URL(url.toString());
       next.pathname = sourceAlias.rewrittenPath;
       next.searchParams.set("source", sourceAlias.source);
-      return handleVortex(next);
+      return handleVortex(request, next);
     }
     if (url.pathname.startsWith("/api/movie/")) {
-      return handleVortex(rewriteAlias(url, "/api/movie/", "/api/vortex/movie/"));
+      return handleVortex(request, rewriteAlias(url, "/api/movie/", "/api/vortex/movie/"));
     }
     if (url.pathname.startsWith("/api/tv/")) {
-      return handleVortex(rewriteAlias(url, "/api/tv/", "/api/vortex/tv/"));
+      return handleVortex(request, rewriteAlias(url, "/api/tv/", "/api/vortex/tv/"));
     }
     if (url.pathname.startsWith("/api/stream") || url.pathname.startsWith("/m3u8-proxy")) {
       return handleStream(request);
     }
-    return json({ ok: false, error: "Not found" }, 404);
+    return json({ ok: false, error: "Not found" }, 404, {}, request);
   }
 };
+function guardAccess(request, url, env) {
+  const origin = request.headers.get("origin");
+  const referer = request.headers.get("referer");
+  const acceptsHtml = request.headers.get("accept")?.includes("text/html") ?? false;
+  const isNavigation = request.headers.get("sec-fetch-mode") === "navigate" || acceptsHtml;
+  const isLocalHost = ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  const token = request.headers.get("x-token") ?? request.headers.get("x-api-token") ?? url.searchParams.get("token");
+  if (env.VORTEX_API_TOKEN && token === env.VORTEX_API_TOKEN) return null;
+  if (origin) {
+    if (ALLOWED_ORIGINS.has(origin)) return null;
+    return json({ ok: false, error: "Origin not allowed" }, 403, {}, request);
+  }
+  if (referer) {
+    try {
+      if (ALLOWED_ORIGINS.has(new URL(referer).origin)) return null;
+    } catch {
+    }
+  }
+  if (isNavigation && !isLocalHost) {
+    return Response.redirect(BASEMENT_HOME, 302);
+  }
+  return null;
+}
 function rewriteAlias(url, from, to) {
   const next = new URL(url.toString());
   next.pathname = next.pathname.replace(from, to);
@@ -851,9 +936,10 @@ function matchSourceAlias(pathname) {
   }
   return null;
 }
-async function handleVortex(url) {
+async function handleVortex(request, url) {
   const segs = url.pathname.replace(/^\/api\/vortex\/?/, "").split("/").filter(Boolean);
   const ttl = Math.min(Math.max(Number(url.searchParams.get("ttl")) || 600, 30), 3600);
+  const lang = normalizeLanguageParam(url.searchParams.get("lang"));
   const pathSource = segs[0] === "movie" ? segs[2] : segs[0] === "tv" ? segs[4] : void 0;
   const source = sanitizeSource(pathSource ?? url.searchParams.get("source"));
   try {
@@ -878,13 +964,32 @@ async function handleVortex(url) {
         throw new Error("Use /api/vortex/movie/{id}, /api/vortex/tv/{id}/{season}/{episode}, or /api/vortex/anime/{id}/{episode}/{type}");
       }
     );
-    return json(data, 200, {
+    return json(filterResultLanguage(data, lang), 200, {
       "x-cache": cached ? "HIT" : "MISS",
       "cache-control": `private, max-age=${ttl}`
-    });
+    }, request);
   } catch (error) {
-    return json({ ok: false, source, error: String(error.message ?? error) }, 502);
+    return json({ ok: false, source, error: String(error.message ?? error) }, 502, {}, request);
   }
+}
+function normalizeLanguageParam(input) {
+  const clean = input?.trim();
+  if (!clean || clean.toLowerCase() === "default") return "english";
+  if (clean.toLowerCase() === "all") return null;
+  return clean.toLowerCase();
+}
+function filterResultLanguage(data, lang) {
+  if (!lang) return data;
+  const filterCaptions = (captions = []) => captions.filter((caption) => caption.language?.toLowerCase().includes(lang));
+  const streams = data.streams.map((stream) => ({
+    ...stream,
+    captions: filterCaptions(stream.captions)
+  }));
+  return {
+    ...data,
+    primary: streams[0] ?? { ...data.primary, captions: filterCaptions(data.primary.captions) },
+    streams
+  };
 }
 function sanitizeSource(source) {
   const clean = source?.trim().toLowerCase();
@@ -1031,12 +1136,12 @@ function rewriteManifest(manifest, upstream, requestUrl) {
   }).join("\n");
   return { body, rewrittenUrls };
 }
-function json(body, status = 200, extra = {}) {
-  return new Response(JSON.stringify(body), {
+function json(body, status = 200, extra = {}, request) {
+  return new Response(JSON.stringify(body, null, 2), {
     status,
     headers: {
       "content-type": "application/json",
-      ...corsHeaders(),
+      ...corsHeaders(request),
       ...extra
     }
   });

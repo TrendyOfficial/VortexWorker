@@ -25,10 +25,22 @@ const ALLOWED_ORIGINS = new Set([
   "http://127.0.0.1:5174",
 ]);
 const BASEMENT_HOME = "https://basementx.xyz/";
+const RATE_WINDOW_MS = 60_000;
+const DEFAULT_API_RATE_LIMIT = 60;
+const DEFAULT_STREAM_RATE_LIMIT = 240;
 
 type Env = {
   VORTEX_API_TOKEN?: string;
+  API_RATE_LIMIT_PER_MINUTE?: string;
+  STREAM_RATE_LIMIT_PER_MINUTE?: string;
 };
+
+type RateBucket = {
+  count: number;
+  resetAt: number;
+};
+
+const rateBuckets = new Map<string, RateBucket>();
 
 function corsHeaders(request?: Request): Record<string, string> {
   const origin = request?.headers.get("origin");
@@ -59,6 +71,8 @@ export default {
     }
 
     const url = new URL(request.url);
+    const rateLimited = checkRateLimit(request, env, url.pathname.startsWith("/api/stream") || url.pathname.startsWith("/m3u8-proxy"));
+    if (rateLimited) return rateLimited;
 
     const accessResponse = guardAccess(request, url, env);
     if (accessResponse) return accessResponse;
@@ -69,6 +83,10 @@ export default {
         gitCommit: GIT_COMMIT,
         deployedAt: DEPLOYED_AT,
         environment: "production",
+        rateLimit: {
+          apiPerMinute: parseLimit(env.API_RATE_LIMIT_PER_MINUTE, DEFAULT_API_RATE_LIMIT),
+          streamPerMinute: parseLimit(env.STREAM_RATE_LIMIT_PER_MINUTE, DEFAULT_STREAM_RATE_LIMIT),
+        },
         routes: [
           "/api/stream",
           "/m3u8-proxy",
@@ -87,6 +105,10 @@ export default {
         gitCommit: GIT_COMMIT,
         deployedAt: DEPLOYED_AT,
         note: "API-only Worker for Vortex. Prefer direct upstream stream URLs; /api/stream is a fallback.",
+        rateLimit: {
+          apiPerMinute: parseLimit(env.API_RATE_LIMIT_PER_MINUTE, DEFAULT_API_RATE_LIMIT),
+          streamPerMinute: parseLimit(env.STREAM_RATE_LIMIT_PER_MINUTE, DEFAULT_STREAM_RATE_LIMIT),
+        },
         routes: [
           "/api/vortex/movie/{tmdbId}",
           "/api/vortex/tv/{tmdbId}/{season}/{episode}",
@@ -129,6 +151,48 @@ export default {
     return json({ ok: false, error: "Not found" }, 404, {}, request);
   },
 };
+
+function parseLimit(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function checkRateLimit(request: Request, env: Env, isStream: boolean): Response | null {
+  const limit = isStream
+    ? parseLimit(env.STREAM_RATE_LIMIT_PER_MINUTE, DEFAULT_STREAM_RATE_LIMIT)
+    : parseLimit(env.API_RATE_LIMIT_PER_MINUTE, DEFAULT_API_RATE_LIMIT);
+  const ip =
+    request.headers.get("cf-connecting-ip") ??
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+    "unknown";
+  const key = `${isStream ? "stream" : "api"}:${ip}`;
+  const now = Date.now();
+  const current = rateBuckets.get(key);
+  const bucket = current && current.resetAt > now ? current : { count: 0, resetAt: now + RATE_WINDOW_MS };
+  bucket.count += 1;
+  rateBuckets.set(key, bucket);
+
+  if (rateBuckets.size > 5000) {
+    for (const [bucketKey, value] of rateBuckets) {
+      if (value.resetAt <= now) rateBuckets.delete(bucketKey);
+    }
+  }
+
+  if (bucket.count <= limit) return null;
+
+  const retryAfter = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+  return json(
+    { ok: false, error: "Rate limit exceeded", retryAfter },
+    429,
+    {
+      "retry-after": String(retryAfter),
+      "x-ratelimit-limit": String(limit),
+      "x-ratelimit-remaining": "0",
+      "x-ratelimit-reset": String(Math.ceil(bucket.resetAt / 1000)),
+    },
+    request,
+  );
+}
 
 function guardAccess(request: Request, url: URL, env: Env): Response | null {
   const origin = request.headers.get("origin");

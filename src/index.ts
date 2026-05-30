@@ -157,6 +157,10 @@ function guardAccess(request: Request, url: URL, env: Env): Response | null {
     return Response.redirect(BASEMENT_HOME, 302);
   }
 
+  if (env.VORTEX_API_TOKEN) {
+    return json({ ok: false, error: "Token required" }, 401, {}, request);
+  }
+
   return null;
 }
 

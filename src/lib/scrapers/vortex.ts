@@ -20,7 +20,7 @@ export type VortexResult = {
 
 const VIDZEE_BASE = "https://player.vidzee.wtf";
 const VIDZEE_KEY_URL = "https://core.vidzee.wtf/api-key";
-const VIDZEE_KEY_SECRET = "4f2a9c7d1e8b3a6f0d5c2e9a7b1f4d8c";
+const VIDZEE_KEY_SECRET = "c4a8f1d7e2b9a6c3d0f5e8a1b7c4d9e2";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
 

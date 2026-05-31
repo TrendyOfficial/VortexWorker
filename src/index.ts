@@ -324,7 +324,7 @@ async function handleVortex(request: Request, url: URL): Promise<Response> {
   try {
     const { data, cached } = await withCache<VortexResult>(
       "vortex-stream",
-      `${source}:${segs.join("/")}`,
+      `own-v1:${source}:${segs.join("/")}`,
       ttl,
       async () => {
         if (segs[0] === "movie") {

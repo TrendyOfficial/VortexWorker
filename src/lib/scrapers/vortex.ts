@@ -1,7 +1,5 @@
 import {
   resolveAnime as resolveVertexAnime,
-  resolveMovie as resolveVertexMovie,
-  resolveTv as resolveVertexTv,
   type VertexCaption,
   type VertexStream,
 } from "./vertex";
@@ -23,12 +21,6 @@ export type VortexResult = {
 const VIDZEE_BASE = "https://player.vidzee.wtf";
 const VIDZEE_KEY_URL = "https://core.vidzee.wtf/api-key";
 const VIDZEE_KEY_SECRET = "4f2a9c7d1e8b3a6f0d5c2e9a7b1f4d8c";
-const ENCRYPT_API_BASE = "https://enc-dec.app/api";
-const VIDLINK_API_BASE = "https://vidlink.pro/api/b";
-const VIDLINK_HEADERS = {
-  Referer: "https://vidlink.pro/",
-  Origin: "https://vidlink.pro",
-};
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
 
@@ -47,25 +39,6 @@ type VidzeeResponse = {
   provider?: string;
   url?: VidzeeSource[];
   tracks?: VidzeeTrack[];
-};
-
-type VidlinkCaption = {
-  id?: string;
-  url?: string;
-  language?: string;
-  type?: string;
-  hasCorsRestrictions?: boolean;
-};
-
-type VidlinkResponse = {
-  stream?: {
-    id?: string;
-    type?: "hls" | "file";
-    playlist?: string;
-    qualities?: Record<string, { type: string; url: string }>;
-    captions?: VidlinkCaption[];
-    headers?: Record<string, string>;
-  };
 };
 
 const BRIDGE_SOURCE_LABELS: Record<string, string> = {
@@ -183,21 +156,6 @@ function normalizeCaptions(tracks?: VidzeeTrack[]): VortexCaption[] {
   }, []);
 }
 
-function normalizeVidlinkCaptions(captions?: VidlinkCaption[]): VortexCaption[] {
-  return (captions ?? []).reduce<VortexCaption[]>((acc, caption, index) => {
-    if (!caption.url) return acc;
-
-    acc.push({
-      id: caption.id ?? `caption-${index}`,
-      url: caption.url,
-      language: caption.language ?? "unknown",
-      type: caption.type === "srt" ? "srt" : "vtt",
-    });
-
-    return acc;
-  }, []);
-}
-
 function parseEmbeddedHeaders(url: string): Record<string, string> {
   try {
     const headersParam = new URL(url).searchParams.get("headers");
@@ -214,11 +172,6 @@ function parseEmbeddedHeaders(url: string): Record<string, string> {
   } catch {
     return {};
   }
-}
-
-function headersFromQualities(qualities: Record<string, { type: string; url: string }>) {
-  const firstUrl = Object.values(qualities)[0]?.url;
-  return firstUrl ? parseEmbeddedHeaders(firstUrl) : {};
 }
 
 async function getVidzeeKey(): Promise<string> {
@@ -307,78 +260,6 @@ async function resolveVidzee(
   );
 
   return settled.filter((stream): stream is VortexStream => !!stream);
-}
-
-async function encryptVidlinkId(id: string): Promise<string> {
-  const url = new URL(`${ENCRYPT_API_BASE}/enc-vidlink`);
-  url.searchParams.set("text", id);
-  const res = await fetchWithTimeout(url.toString(), { timeout: 5000 });
-  if (!res.ok) return "";
-
-  const data = (await res.json()) as { result?: string };
-  return data.result ?? "";
-}
-
-async function resolveVidlink(
-  kind: "movie" | "tv",
-  id: string,
-  season?: string,
-  episode?: string,
-): Promise<VortexStream[]> {
-  try {
-    const encryptedId = await encryptVidlinkId(id);
-    if (!encryptedId) return [];
-
-    const url =
-      kind === "movie"
-        ? `${VIDLINK_API_BASE}/movie/${encryptedId}?multiLang=0`
-        : `${VIDLINK_API_BASE}/tv/${encryptedId}/${season}/${episode}?multiLang=0`;
-
-    const res = await fetchWithTimeout(url, {
-      timeout: 6500,
-      headers: {
-        Referer: "https://vidlink.pro/",
-        Origin: "https://vidlink.pro",
-      },
-    });
-    if (!res.ok) return [];
-
-    const data = (await res.json()) as VidlinkResponse;
-    const stream = data.stream;
-    if (!stream) return [];
-
-    if (stream.type === "hls" && stream.playlist) {
-      return [
-        {
-          id: "vortex-link",
-          label: "Vortex Link",
-          type: "hls",
-          playlist: stream.playlist,
-          captions: normalizeVidlinkCaptions(stream.captions),
-          headers: { ...VIDLINK_HEADERS, ...(stream.headers ?? {}) },
-          upstream: "vortex/link",
-        },
-      ];
-    }
-
-    if (stream.type === "file" && stream.qualities && Object.keys(stream.qualities).length > 0) {
-      return [
-        {
-          id: "vortex-link",
-          label: "Vortex Link",
-          type: "file",
-          qualities: stream.qualities,
-          captions: normalizeVidlinkCaptions(stream.captions),
-          headers: { ...VIDLINK_HEADERS, ...headersFromQualities(stream.qualities), ...(stream.headers ?? {}) },
-          upstream: "vortex/link",
-        },
-      ];
-    }
-
-    return [];
-  } catch {
-    return [];
-  }
 }
 
 async function timed<T>(promise: Promise<T>, timeout: number, fallback: T): Promise<T> {
@@ -476,23 +357,6 @@ async function playableStreams(streams: VortexStream[]): Promise<VortexStream[]>
   return checked.filter((stream): stream is VortexStream => !!stream);
 }
 
-async function withVertexFallback(
-  streams: VortexStream[],
-  fallback: () => Promise<{ streams?: VortexStream[]; primary?: VortexStream }>,
-): Promise<VortexStream[]> {
-  if (streams.length >= 2) return streams;
-
-  try {
-    const result = await fallback();
-    return uniqueStreams([
-      ...streams,
-      ...(result.streams?.length ? result.streams : result.primary ? [result.primary] : []),
-    ]);
-  } catch {
-    return streams;
-  }
-}
-
 export async function resolveVortexMovie(tmdbId: string): Promise<VortexResult> {
   const start = Date.now();
   const db = await resolveVortexDbEntry("movie", tmdbId);
@@ -511,13 +375,8 @@ export async function resolveVortexMovie(tmdbId: string): Promise<VortexResult> 
     }
   }
 
-  const [vidzeeStreams, linkStreams] = await Promise.all([
-    timed(resolveVidzee("movie", tmdbId), 7000, []),
-    timed(resolveVidlink("movie", tmdbId), 7000, []),
-  ]);
-  let streams = await playableStreams(uniqueStreams([...vidzeeStreams, ...linkStreams]));
-  streams = await withVertexFallback(streams, () => resolveVertexMovie(tmdbId));
-  streams = await playableStreams(streams);
+  const vidzeeStreams = await timed(resolveVidzee("movie", tmdbId), 7000, []);
+  const streams = await playableStreams(uniqueStreams(vidzeeStreams));
   if (streams.length === 0) throw new Error("Vortex could not resolve a stream for this movie");
 
   return {
@@ -569,14 +428,8 @@ export async function resolveVortexTv(
     }
   }
 
-  const [vidzeeStreams, linkStreams] = await Promise.all([
-    timed(resolveVidzee("tv", tmdbId, season, episode), 7000, []),
-    timed(resolveVidlink("tv", tmdbId, season, episode), 7000, []),
-  ]);
-  let streams = await playableStreams(uniqueStreams([...vidzeeStreams, ...linkStreams]));
-  if (streams.length === 0)
-    streams = await withVertexFallback(streams, () => resolveVertexTv(tmdbId, season, episode));
-  streams = await playableStreams(streams);
+  const vidzeeStreams = await timed(resolveVidzee("tv", tmdbId, season, episode), 7000, []);
+  const streams = await playableStreams(uniqueStreams(vidzeeStreams));
   if (streams.length === 0) throw new Error(`Vortex could not resolve S${season}E${episode}`);
 
   return {

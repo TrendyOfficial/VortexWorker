@@ -11,6 +11,7 @@ import {
 const DEFAULT_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
 const GOAT_API_BASE = "https://goatapi.imreallydagoatt.workers.dev";
+const LOOPIFED_PROXY = "https://loopifed.netlify.app/";
 const SERVICE_NAME = "VortexWorker";
 const GIT_COMMIT = "034a2c5";
 const DEPLOYED_AT = "2026-05-21T00:00:00.000Z";
@@ -421,9 +422,10 @@ async function handleStream(request: Request): Promise<Response> {
     "User-Agent": DEFAULT_UA,
     Accept: "*/*",
     Referer: ref || `${upstream.protocol}//${upstream.host}/`,
-    Origin: origin || `${upstream.protocol}//${upstream.host}`,
     ...providedHeaders,
   };
+  if (origin) headers.Origin = origin;
+  delete headers.origin;
   if (range) headers.Range = range;
 
   const safeHeaders = Object.fromEntries(
@@ -439,10 +441,31 @@ async function handleStream(request: Request): Promise<Response> {
     proxyRoute: url.pathname.startsWith("/m3u8-proxy") ? "/m3u8-proxy" : "/api/stream",
   });
 
-  const response = await fetch(upstream.toString(), { method: request.method, headers });
-  const contentType = response.headers.get("content-type") ?? "";
+  let response = await fetch(upstream.toString(), { method: request.method, headers });
+  let contentType = response.headers.get("content-type") ?? "";
   const isManifest =
     /mpegurl|m3u8/i.test(contentType) || /\.m3u8(\?|$)/i.test(upstream.pathname + upstream.search);
+
+  if (isManifest && response.status === 204) {
+    const retryHeaders = { ...headers };
+    delete retryHeaders.Origin;
+    delete retryHeaders.origin;
+    response = await fetch(upstream.toString(), { method: request.method, headers: retryHeaders });
+
+    if (response.status === 204) {
+      const proxyUrl = new URL(LOOPIFED_PROXY);
+      proxyUrl.searchParams.set("destination", upstream.toString());
+      response = await fetch(proxyUrl.toString(), {
+        method: request.method,
+        headers: {
+          ...retryHeaders,
+          "x-referer": retryHeaders.Referer ?? retryHeaders.referer ?? "",
+          "x-user-agent": retryHeaders["User-Agent"] ?? retryHeaders["user-agent"] ?? DEFAULT_UA,
+        },
+      });
+    }
+    contentType = response.headers.get("content-type") ?? "";
+  }
 
   const responseHeaders: Record<string, string> = {
     ...corsHeaders(request),
@@ -459,6 +482,7 @@ async function handleStream(request: Request): Promise<Response> {
     const value = response.headers.get(header);
     if (value) responseHeaders[header] = value;
   }
+  if (isManifest) responseHeaders["cache-control"] = "no-store";
 
   streamLog({
     stage: "worker:stream-response",
